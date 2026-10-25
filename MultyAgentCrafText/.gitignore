@@ -1,0 +1,117 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Large/binary files
+*.tfevents.*
+*.mp4
+*.pbz2
+*.pth
+*.pt
+*.h5
+*.bin
+*.pkl
+*.pickle
+*.npy
+*.npz
+
+# TensorBoard/ML logs
+events.out.tfevents.*
+*.ml3
+
+# Data/log directories
+baselines/runs/
+baselines/videos_from_checkpoints/
+*.log
+*.csv
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Additional common patterns
+*.tmp
+*.temp
+.cache/
+.output/
+results/
+experiments/
+checkpoints/
+models/
+wandb/
+mlruns/
+EOF
+MA-Craftax/baselines/.locks/
+MA-Craftax/baselines/models--distilbert-base-uncased/
+
+# ResearcherOS / koi sync
+koi-structure
+koi-structure/
+.koi-sync-worktree/
+.koi-sync-bootstrap/

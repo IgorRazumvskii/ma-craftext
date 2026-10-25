@@ -1,0 +1,30 @@
+services:
+  mappo:
+    image: mappo-craftext:latest
+    build:
+      context: ..
+      dockerfile: MultyAgentCrafText/Dockerfile
+    init: true
+    shm_size: "2gb"
+    env_file:
+      - .env
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["1"]
+              capabilities: [gpu]
+    environment:
+      HF_HUB_UPLOAD: ${HF_HUB_UPLOAD:-1}
+      HF_HUB_REPO_ID: ${HF_HUB_REPO_ID:-igor69raz/ma-craftax-mappo}
+      XLA_PYTHON_CLIENT_PREALLOCATE: ${XLA_PYTHON_CLIENT_PREALLOCATE:-false}
+    volumes:
+      # CrafText passes cache_dir=".", so persist the exact model directory.
+      - huggingface-cache:/workspace/MultyAgentCrafText/MA-Craftax/models--distilbert-base-uncased
+      # Latest training weights on the host. The file inside is replaced, not accumulated.
+      - /home/razumovsky_id/work/checkpoint:/home/razumovsky_id/work/checkpoint
+    command: ["mappo_rnn.yaml"]
+
+volumes:
+  huggingface-cache:

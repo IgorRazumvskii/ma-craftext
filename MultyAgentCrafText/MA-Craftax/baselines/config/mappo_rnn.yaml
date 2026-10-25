@@ -1,0 +1,59 @@
+# Weights & Biases configuration
+WANDB_MODE: "online" # Change to "online" for logging and include appropriate ENTITY and PROJECT arguments
+ENTITY: ""
+PROJECT: ""
+RUN_NAME: "MAPPO - Base"
+
+# Comet ML (my_mappo.py; переопределяет дефолты из кода при необходимости)
+COMET_PROJECT_NAME: "ma-craftax"
+COMET_WORKSPACE: "igorrazumvskii"
+
+# Environment configuration
+ENV_NAME: "Craftax-Coop-Symbolic" # Can be changed to "Craftax-Coop-Symbolic", "Craftax-Coop-Pixels", "Craftax-MA-Symbolic", "Craftax-MA-Pixels"
+CRAFTEXT_CONFIG_NAME: "easy_train"
+
+# Model parameters
+ALG_NAME: "mappo-rnn"
+GRU_HIDDEN_DIM: 512
+FC_DIM_SIZE: 128
+ACTIVATION: "tanh"
+
+# Training parameters
+TOTAL_TIMESTEPS: 1000000000
+NUM_ENVS: 256
+NUM_STEPS: 64
+NUM_MINIBATCHES: 8
+UPDATE_EPOCHS: 4
+GAE_LAMBDA: 0.8
+GAMMA: 0.99
+CLIP_EPS: 0.2
+SCALE_CLIP_EPS: false
+ENT_COEF: 0.01
+VF_COEF: 0.5
+ANNEAL_LR: true
+LR: 0.0002
+MAX_GRAD_NORM: 1.0
+LR_WARMUP: 0.0
+REW_SHAPING_HORIZON: 1000000
+
+# Seed configuration
+NUM_SEEDS: 1
+SEED: 0
+
+# Checkpointing
+CHECKPOINT_INTERVAL: 100
+LOG_DIR: "/tmp/mappo-runs"
+CHECKPOINT_DIR: "/tmp/mappo-checkpoints"
+# One file on the host. A new checkpoint replaces it; the container /tmp copy is still deleted after upload.
+PERSISTENT_CHECKPOINT_DIR: "/home/razumovsky_id/work/checkpoint"
+DELETE_LOCAL_CHECKPOINT_AFTER_UPLOAD: true
+
+# Optional Hugging Face Hub auto-upload of checkpoints (off by default).
+# Enable via YAML, CLI (--hf-upload --hf-repo-id …), or env:
+#   HF_HUB_UPLOAD=1 HF_HUB_REPO_ID=user/repo HF_TOKEN=hf_…
+HF_HUB_UPLOAD: true
+HF_HUB_REPO_ID: "igor69raz/ma-craftax-mappo"
+HF_HUB_REPO_TYPE: "model"
+HF_HUB_PRIVATE: true
+HF_HUB_PATH_PREFIX: "checkpoints"
+HF_HUB_SQUASH_HISTORY: true

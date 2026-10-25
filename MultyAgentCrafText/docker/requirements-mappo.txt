@@ -1,0 +1,33 @@
+# Versions aligned with CrafText 0.1.5 and its JAX-based environment.
+jax[cuda12]==0.4.30
+jaxlib==0.4.30
+# Avoid pulling CUDA 12.9 ptxas, which disables parallel XLA compilation on
+# hosts whose NVIDIA driver exposes CUDA 12.6.
+nvidia-cuda-nvcc-cu12==12.1.105
+nvidia-nvjitlink-cu12==12.1.105
+numpy==1.24.3
+flax==0.8.5
+optax==0.2.1
+distrax==0.1.5
+chex==0.1.86
+
+# Environment and MAPPO wrappers.
+gym==0.26.2
+gymnax==0.0.6
+jaxmarl==0.0.7
+PyYAML==6.0.2
+pygame==2.6.1
+imageio==2.35.1
+Pillow==10.4.0
+matplotlib==3.9.2
+seaborn==0.13.2
+
+# CrafText instruction encoder.
+torch==2.4.1
+transformers==4.44.2
+tqdm==4.66.5
+
+# Experiment logging and checkpoint upload.
+comet-ml==3.47.6
+wandb==0.13.11
+huggingface-hub==0.24.7
