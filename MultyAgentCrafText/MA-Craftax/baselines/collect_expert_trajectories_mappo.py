@@ -221,6 +221,33 @@ def save_rollout_part(traj, parts_dir, part_idx, trajectory_id_base, take, step_
     return {"path": str(part_path), "num_rows": int(len(env_idx))}, counts
 
 
+def prepare_stream_upload(repo_id, private, parts_dir, output_base):
+    from hf_hub_utils import resolve_hf_repo_id, resolve_hf_token
+    from huggingface_hub import HfApi
+
+    repo_id = resolve_hf_repo_id(repo_id)
+    token = resolve_hf_token()
+    if not repo_id or not token:
+        raise ValueError("Streaming upload requires --hf-repo-id and HF_TOKEN")
+    api = HfApi(token=token)
+    api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
+    existing = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
+    reserved = {output_base.with_suffix(".meta.json").name,
+                output_base.with_suffix(".embeddings.npz").name}
+    if any(path.startswith(parts_dir.name + "/") or path in reserved for path in existing):
+        raise FileExistsError("Dataset name already exists on Hugging Face; choose a new --output")
+    return api, repo_id
+
+
+def stream_upload_file(api, repo_id, path, remote_path):
+    # Keep the local file on any upload error so it can be recovered manually.
+    path = Path(path)
+    api.upload_file(path_or_fileobj=str(path), path_in_repo=remote_path,
+                    repo_id=repo_id, repo_type="dataset")
+    path.unlink()
+    print(f"[hf_hub] Uploaded and removed local file: {remote_path}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Collect expert trajectories from MAPPO checkpoint"
@@ -285,6 +312,10 @@ def main():
         help="Upload collected parts + meta.json to Hugging Face Hub after collection",
     )
     parser.add_argument(
+        "--hf-stream-upload", action="store_true",
+        help="Upload each part immediately and delete it locally after successful upload; requires --hf-upload",
+    )
+    parser.add_argument(
         "--hf-repo-id",
         type=str,
         default=None,
@@ -296,6 +327,8 @@ def main():
         help="Create/use a public Hub dataset repo (default: private)",
     )
     args = parser.parse_args()
+    if args.hf_stream_upload and not args.hf_upload:
+        parser.error("--hf-stream-upload requires --hf-upload")
 
     if args.checkpoint is None and args.checkpoint_dir is None:
         raise ValueError("Provide either --checkpoint or --checkpoint-dir")
@@ -389,6 +422,13 @@ def main():
     num_agents = env.num_agents
     num_actors_collect = num_agents * num_envs_collect
 
+    stream_api = None
+    stream_repo = None
+    if args.hf_stream_upload:
+        stream_api, stream_repo = prepare_stream_upload(
+            args.hf_repo_id, not args.hf_public, parts_dir, output_base
+        )
+
     # Store the exact embeddings used in this process; no model re-encoding is needed.
     embedding_path = None
     if args.compact_observations:
@@ -397,6 +437,8 @@ def main():
         embedding_path = output_base.with_suffix(".embeddings.npz")
         embedding_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(embedding_path, embeddings=embeddings)
+        if stream_api is not None:
+            stream_upload_file(stream_api, stream_repo, embedding_path, embedding_path.name)
 
     # Files contain rollout blocks. An episode can span multiple parts.
     while trajectories_done < args.num_trajectories:
@@ -428,6 +470,10 @@ def main():
             )
             if part:
                 parts_manifest.append(part)
+                if stream_api is not None:
+                    part_path = Path(part["path"])
+                    stream_upload_file(stream_api, stream_repo, part_path,
+                                       f"{parts_dir.name}/{part_path.name}")
                 total_steps_collected += part["num_rows"]
             lengths += counts
             steps_run += block_len
@@ -487,6 +533,14 @@ def main():
         f"Done. Parts saved: {len(parts_manifest)}, total transitions: {total_steps_collected}, "
         f"parts dir: {parts_dir}"
     )
+
+    if stream_api is not None:
+        # Metadata is the completion marker: publish only after every part succeeded.
+        stream_upload_file(stream_api, stream_repo, meta_path, meta_path.name)
+        if parts_dir.exists():
+            parts_dir.rmdir()
+        print(f"[hf_hub] Dataset complete: {stream_repo}")
+        return
 
     # Optional Hugging Face Hub upload of parts + metadata.
     hf_private = not bool(args.hf_public)
