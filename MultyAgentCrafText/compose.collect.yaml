@@ -1,0 +1,39 @@
+services:
+  collect:
+    image: mappo-craftext:latest
+    build:
+      context: ..
+      dockerfile: MultyAgentCrafText/Dockerfile
+    init: true
+    shm_size: "2gb"
+    entrypoint: ["bash", "baselines/run_mappo_collect.sh"]
+    command: []
+    environment:
+      HF_TOKEN: ${HF_TOKEN:?Set HF_TOKEN with dataset write access}
+      HF_DATASET_REPO_ID: ${HF_DATASET_REPO_ID:?Set HF_DATASET_REPO_ID to owner/dataset}
+      COLLECT_NUM_TRAJECTORIES: ${COLLECT_NUM_TRAJECTORIES:-4}
+      COLLECT_NUM_ENVS: ${COLLECT_NUM_ENVS:-2}
+      COLLECT_ROLLOUT_STEPS: ${COLLECT_ROLLOUT_STEPS:-128}
+      COLLECT_MAX_STEPS: ${COLLECT_MAX_STEPS:-2000}
+      COLLECT_SEED: ${COLLECT_SEED:-0}
+      XLA_PYTHON_CLIENT_PREALLOCATE: ${XLA_PYTHON_CLIENT_PREALLOCATE:-false}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${COLLECT_GPU_ID:-0}"]
+              capabilities: [gpu]
+    volumes:
+      - type: bind
+        source: ${COLLECT_CHECKPOINT:?Set COLLECT_CHECKPOINT to the absolute path of a checkpoint file}
+        target: /checkpoint/mappo_model_latest.pkl
+        read_only: true
+        bind:
+          create_host_path: false
+      - collect-staging:/staging
+      - huggingface-cache:/workspace/MultyAgentCrafText/MA-Craftax/models--distilbert-base-uncased
+
+volumes:
+  collect-staging:
+  huggingface-cache:

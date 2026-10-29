@@ -270,7 +270,10 @@ def main():
         default=None,
         help="Output .npz file path (default: datasets/expert_mappo_<timestamp>.npz)",
     )
-    parser.add_argument("--num-trajectories", type=int, default=100)
+    parser.add_argument("--num-trajectories", type=int, default=100,
+                        help="Number of successful trajectories to collect")
+    parser.add_argument("--max-attempts", type=int, default=0,
+                        help="Maximum attempted episodes; 0 means unlimited")
     parser.add_argument("--max-steps", type=int, default=2000)
     parser.add_argument(
         "--num-envs-collect",
@@ -391,8 +394,8 @@ def main():
         raise ValueError("--save-every-trajectories must be > 0")
     print("Note: parts are now written every rollout block; --save-every-trajectories is ignored.")
 
-    if args.num_trajectories <= 0 or args.max_steps <= 0 or args.rollout_steps <= 0:
-        raise ValueError("--num-trajectories, --max-steps and --rollout-steps must be > 0")
+    if args.num_trajectories <= 0 or args.max_steps <= 0 or args.rollout_steps <= 0 or args.max_attempts < 0:
+        raise ValueError("--num-trajectories, --max-steps and --rollout-steps must be > 0; --max-attempts must be >= 0")
     rollout_steps = min(args.rollout_steps, args.max_steps)
     rollout_fn = build_rollout_fn(
         env=env,
@@ -407,6 +410,9 @@ def main():
 
     rng = jax.random.PRNGKey(args.seed)
     trajectories_done = 0
+    attempts_done = 0
+    failed_episodes = 0
+    truncated_episodes = 0
     total_steps_collected = 0
     total_len_sum = 0
     min_len = None
@@ -416,6 +422,9 @@ def main():
     output_base = Path(output_path)
     parts_dir = output_base.with_suffix("").parent / f"{output_base.with_suffix('').name}_parts"
     parts_manifest = []
+    pending_dir = output_base.with_suffix("").parent / f"{output_base.with_suffix('').name}_pending"
+    if pending_dir.exists():
+        raise FileExistsError(f"Pending trajectory directory already exists: {pending_dir}")
     if parts_dir.exists() or output_base.with_suffix(".meta.json").exists() or output_base.with_suffix(".embeddings.npz").exists():
         raise FileExistsError(f"Dataset output already exists for {output_base}; choose a new --output")
 
@@ -440,9 +449,14 @@ def main():
         if stream_api is not None:
             stream_upload_file(stream_api, stream_repo, embedding_path, embedding_path.name)
 
-    # Files contain rollout blocks. An episode can span multiple parts.
+    # Keep each episode on disk until its terminal success is known. Publishing
+    # earlier would leak failed episodes into the dataset.
     while trajectories_done < args.num_trajectories:
+        if args.max_attempts and attempts_done >= args.max_attempts:
+            break
         take_in_batch = min(num_envs_collect, args.num_trajectories - trajectories_done)
+        if args.max_attempts:
+            take_in_batch = min(take_in_batch, args.max_attempts - attempts_done)
         rng, reset_rng = jax.random.split(rng)
         reset_keys = jax.random.split(reset_rng, num_envs_collect)
         obs_batch, env_state_batch = jax.vmap(
@@ -456,48 +470,87 @@ def main():
         carry = (env_state_batch, obs_batch, last_done, hstate, rollout_rng,
                  jnp.arange(num_envs_collect) < take_in_batch)
         lengths = np.zeros(take_in_batch, dtype=np.int64)
+        resolved = np.zeros(take_in_batch, dtype=bool)
+        pending = [[] for _ in range(take_in_batch)]
         steps_run = 0
         while steps_run < args.max_steps:
-            # The final block may be padded; rows beyond max_steps are discarded.
             carry, traj = rollout_fn(carry)
             traj_np = jax.device_get(traj)
             block_len = min(rollout_steps, args.max_steps - steps_run)
             if block_len != rollout_steps:
                 traj_np = {key: value[:block_len] for key, value in traj_np.items()}
-            part_idx += 1
-            part, counts = save_rollout_part(
-                traj_np, parts_dir, part_idx, trajectories_done, take_in_batch, lengths
-            )
-            if part:
-                parts_manifest.append(part)
-                if stream_api is not None:
-                    part_path = Path(part["path"])
-                    stream_upload_file(stream_api, stream_repo, part_path,
-                                       f"{parts_dir.name}/{part_path.name}")
-                total_steps_collected += part["num_rows"]
-            lengths += counts
             steps_run += block_len
-            if not np.asarray(jax.device_get(carry[-1]))[:take_in_batch].any():
+            for env_idx in range(take_in_batch):
+                if resolved[env_idx]:
+                    continue
+                episode_chunk = {key: value[:, env_idx:env_idx + 1]
+                                 for key, value in traj_np.items()}
+                part_idx += 1
+                # Attempt IDs stay unique even when failed episodes are discarded.
+                part, counts = save_rollout_part(
+                    episode_chunk, pending_dir, part_idx, attempts_done + env_idx,
+                    1, lengths[env_idx:env_idx + 1]
+                )
+                lengths[env_idx] += counts[0]
+                if part:
+                    pending[env_idx].append(part)
+                valid = episode_chunk["valid"][:, 0]
+                done = np.asarray(episode_chunk["done_all"][:, 0], dtype=bool) & valid
+                success = bool(np.any(done & (episode_chunk["instruction_done"][:, 0] > 0)))
+                terminal = bool(done.any())
+                if success:
+                    # All fragments become visible only after success was observed.
+                    parts_dir.mkdir(parents=True, exist_ok=True)
+                    for item in pending[env_idx]:
+                        src = Path(item["path"])
+                        dst = parts_dir / src.name
+                        src.replace(dst)
+                        item["path"] = str(dst)
+                        if stream_api is not None:
+                            stream_upload_file(stream_api, stream_repo, dst,
+                                               f"{parts_dir.name}/{dst.name}")
+                        parts_manifest.append(item)
+                        total_steps_collected += item["num_rows"]
+                    length = int(lengths[env_idx])
+                    total_len_sum += length
+                    min_len = length if min_len is None else min(min_len, length)
+                    max_len = max(max_len, length)
+                    trajectories_done += 1
+                    resolved[env_idx] = True
+                elif terminal or steps_run >= args.max_steps:
+                    for item in pending[env_idx]:
+                        Path(item["path"]).unlink()
+                    failed_episodes += 1
+                    truncated_episodes += int(not terminal)
+                    resolved[env_idx] = True
+            if resolved.all():
                 break
-        total_len_sum += int(lengths.sum())
-        batch_min, batch_max = int(lengths.min()), int(lengths.max())
-        min_len = batch_min if min_len is None else min(min_len, batch_min)
-        max_len = max(max_len, batch_max)
-        trajectories_done += take_in_batch
-        print(f"[{trajectories_done}/{args.num_trajectories}] "
-              f"steps_collected={total_steps_collected}, "
-              f"mean_len={total_len_sum / trajectories_done:.1f}", flush=True)
+        attempts_done += take_in_batch
+        print(f"[success {trajectories_done}/{args.num_trajectories}] "
+              f"attempts={attempts_done}, failed={failed_episodes}, "
+              f"truncated={truncated_episodes}, steps_saved={total_steps_collected}",
+              flush=True)
 
+    if pending_dir.exists():
+        pending_dir.rmdir()
+    complete = trajectories_done == args.num_trajectories
     if total_steps_collected == 0:
         raise RuntimeError("No transitions were collected (empty dataset).")
 
-    avg_len = float(total_len_sum / max(args.num_trajectories, 1))
+    avg_len = float(total_len_sum / max(trajectories_done, 1))
     meta = {
         "checkpoint": str(checkpoint_path),
         "checkpoint_update_steps": checkpoint.get("update_steps", None),
         "env_name": env_name,
         "craftext_config_name": craftext_config_name,
-        "num_trajectories": int(args.num_trajectories),
+        "num_trajectories": int(trajectories_done),
+        "requested_num_trajectories": int(args.num_trajectories),
+        "attempted_trajectories": int(attempts_done),
+        "failed_trajectories": int(failed_episodes),
+        "truncated_trajectories": int(truncated_episodes),
+        "successful_only": True,
+        "complete": complete,
+        "max_attempts": int(args.max_attempts),
         "num_envs_collect": int(num_envs_collect),
         "max_steps": int(args.max_steps),
         "seed": int(args.seed),
@@ -539,8 +592,13 @@ def main():
         stream_upload_file(stream_api, stream_repo, meta_path, meta_path.name)
         if parts_dir.exists():
             parts_dir.rmdir()
+        if not complete:
+            raise RuntimeError("Attempt limit reached before collecting all successful trajectories; partial dataset uploaded")
         print(f"[hf_hub] Dataset complete: {stream_repo}")
         return
+
+    if not complete:
+        raise RuntimeError("Attempt limit reached before collecting all successful trajectories; partial dataset saved locally")
 
     # Optional Hugging Face Hub upload of parts + metadata.
     hf_private = not bool(args.hf_public)
