@@ -48,6 +48,9 @@ def find_latest_checkpoint(checkpoint_dir: str) -> Path:
     if not ckpt_dir.exists():
         raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
 
+    latest = ckpt_dir / "mappo_model_latest.pkl"
+    if latest.is_file():
+        return latest
     candidates = list(ckpt_dir.glob("mappo_model_update_*.pkl"))
     if not candidates:
         raise FileNotFoundError(
@@ -123,6 +126,8 @@ def build_rollout_fn(
     num_envs: int,
     max_steps: int,
     greedy: bool,
+    compact_obs: bool,
+    instruction_dim: int,
 ):
     agents = env.agents
     num_agents = env.num_agents
@@ -148,7 +153,6 @@ def build_rollout_fn(
         action = action.squeeze()
 
         env_act = unbatchify_actions(action, agents, num_envs, num_agents)
-        env_act = {k: v.squeeze() for k, v in env_act.items()}
 
         rng, step_rng = jax.random.split(rng)
         rng_step = jax.random.split(step_rng, num_envs)
@@ -161,6 +165,8 @@ def build_rollout_fn(
         next_alive = jnp.logical_and(alive, jnp.logical_not(done_all))
 
         obs_ead = jnp.swapaxes(jnp.stack([last_obs[a] for a in agents]), 0, 1)
+        if compact_obs:
+            obs_ead = obs_ead[..., :-instruction_dim]
         actions_ea = jnp.swapaxes(jnp.stack([env_act[a] for a in agents]), 0, 1)
         rewards_ea = jnp.swapaxes(jnp.stack([reward[a] for a in agents]), 0, 1)
         dones_ea = jnp.swapaxes(jnp.stack([done[a] for a in agents]), 0, 1)
@@ -184,205 +190,35 @@ def build_rollout_fn(
         new_carry = (next_env_state, next_obs, done_batch, hstate, rng, next_alive)
         return new_carry, transition
 
-    def rollout(env_state, last_obs, last_done, hstate, rng):
-        alive = jnp.ones((num_envs,), dtype=bool)
-        carry = (env_state, last_obs, last_done, hstate, rng, alive)
+    def rollout(carry):
         carry, traj = jax.lax.scan(_env_step, carry, None, max_steps)
         return carry, traj
 
     return jax.jit(rollout)
 
 
-def collect_rows_from_batched_rollout(
-    traj_np: dict,
-    trajectory_id_base: int,
-    num_trajectories_to_take: int,
-):
-    rows = []
-    lengths = []
-    valid = traj_np["valid"]  # [T, E]
-    t_max = valid.shape[0]
-
-    for env_idx in range(num_trajectories_to_take):
-        traj_id = trajectory_id_base + env_idx
-        valid_steps = np.nonzero(valid[:, env_idx])[0]
-        if valid_steps.size == 0:
-            lengths.append(0)
-            continue
-
-        local_step = 0
-        for t in valid_steps:
-            if t >= t_max:
-                break
-            rows.append(
-                {
-                    "trajectory_id": int(traj_id),
-                    "step_id": int(local_step),
-                    "obs": traj_np["obs"][t, env_idx].astype(np.float32),
-                    "actions": traj_np["actions"][t, env_idx].astype(np.int32),
-                    "rewards": traj_np["rewards"][t, env_idx].astype(np.float32),
-                    "dones": traj_np["dones"][t, env_idx].astype(np.bool_),
-                    "done_all": bool(traj_np["done_all"][t, env_idx]),
-                    "instruction_done": float(traj_np["instruction_done"][t, env_idx]),
-                    "instruction_idx": int(traj_np["instruction_idx"][t, env_idx]),
-                    "task_idx": int(traj_np["task_idx"][t, env_idx]),
-                }
-            )
-            local_step += 1
-            if rows[-1]["done_all"]:
-                break
-        lengths.append(local_step)
-    return rows, lengths
-
-
-def run_single_trajectory(
-    env,
-    actor_network,
-    actor_params,
-    rng,
-    trajectory_id: int,
-    max_steps: int,
-    instruction_idx: int,
-    greedy: bool,
-):
-    rng, reset_rng = jax.random.split(rng)
-    obs, env_state = env.reset(reset_rng, instruction_idx=instruction_idx)
-
-    agents = env.agents
-    num_agents = len(agents)
-    hstate = ScannedRNN.initialize_carry(num_agents, actor_network.config["GRU_HIDDEN_DIM"])
-    last_done = jnp.zeros((num_agents,), dtype=bool)
-    actor_action_mask = build_actor_action_mask(env, 1)
-
-    rows = []
-    step_id = 0
-    done_all = False
-
-    while (not done_all) and (step_id < max_steps):
-        obs_arr = np.stack([np.asarray(obs[a]) for a in agents], axis=0)
-        ac_in = (
-            jnp.asarray(obs_arr)[None, :],
-            last_done[None, :],
-            actor_action_mask[None, :],
-        )
-
-        rng, action_rng = jax.random.split(rng)
-        hstate, pi = actor_network.apply(actor_params, hstate, ac_in)
-        if greedy:
-            action = jnp.argmax(pi.probs, axis=-1).squeeze()
-        else:
-            action = pi.sample(seed=action_rng).squeeze()
-
-        if action.ndim > 1:
-            action = action.flatten()
-        action_arr = np.asarray(action, dtype=np.int32).reshape(num_agents)
-        action_dict = {agent: jnp.int32(action_arr[i]) for i, agent in enumerate(agents)}
-
-        rng, step_rng = jax.random.split(rng)
-        next_obs, env_state, reward, done, _ = env.step(step_rng, env_state, action_dict)
-
-        reward_arr = np.asarray([reward[a] for a in agents], dtype=np.float32)
-        done_arr = np.asarray([done[a] for a in agents], dtype=np.bool_)
-
-        rows.append(
-            {
-                "trajectory_id": int(trajectory_id),
-                "step_id": int(step_id),
-                "obs": obs_arr.astype(np.float32),
-                "actions": action_arr.astype(np.int32),
-                "rewards": reward_arr,
-                "dones": done_arr,
-                "done_all": bool(done["__all__"]),
-            }
-        )
-
-        obs = next_obs
-        last_done = jnp.asarray(done_arr)
-        done_all = bool(done["__all__"])
-        step_id += 1
-
-    return rows, rng
-
-
-def save_dataset(rows: list[dict], output_path: str, meta: dict):
-    if not rows:
-        raise RuntimeError("Attempted to save empty rows.")
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    trajectory_id = np.asarray([r["trajectory_id"] for r in rows], dtype=np.int32)
-    step_id = np.asarray([r["step_id"] for r in rows], dtype=np.int32)
-    obs = np.stack([r["obs"] for r in rows], axis=0).astype(np.float32)
-    actions = np.stack([r["actions"] for r in rows], axis=0).astype(np.int32)
-    rewards = np.stack([r["rewards"] for r in rows], axis=0).astype(np.float32)
-    dones = np.stack([r["dones"] for r in rows], axis=0).astype(np.bool_)
-    done_all = np.asarray([r["done_all"] for r in rows], dtype=np.bool_)
-    instruction_done = np.asarray([r["instruction_done"] for r in rows], dtype=np.float32)
-    instruction_idx = np.asarray([r["instruction_idx"] for r in rows], dtype=np.int32)
-    task_idx = np.asarray([r["task_idx"] for r in rows], dtype=np.int32)
-
-    np.savez_compressed(
-        output,
-        trajectory_id=trajectory_id,
-        step_id=step_id,
-        obs=obs,
-        actions=actions,
-        rewards=rewards,
-        dones=dones,
-        done_all=done_all,
-        instruction_done=instruction_done,
-        instruction_idx=instruction_idx,
-        task_idx=task_idx,
-    )
-
-    meta_path = output.with_suffix(".meta.json")
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-
-    print(f"Saved dataset: {output}")
-    print(f"Saved metadata: {meta_path}")
-    print(
-        f"Shapes -> obs: {obs.shape}, actions: {actions.shape}, "
-        f"rewards: {rewards.shape}, steps: {trajectory_id.shape[0]}, "
-        f"instruction_idx: {instruction_idx.shape}"
-    )
-
-
-def save_dataset_part(rows: list[dict], parts_dir: Path, part_idx: int) -> dict:
-    if not rows:
-        return {"path": None, "num_rows": 0}
-
+def save_rollout_part(traj, parts_dir, part_idx, trajectory_id_base, take, step_base):
+    """Save only valid steps, in trajectory-major order, without per-step objects."""
+    valid = traj["valid"][:, :take].T
+    env_idx, time_idx = np.nonzero(valid)
+    if not len(env_idx):
+        return None, np.zeros(take, dtype=np.int64)
+    counts = valid.sum(axis=1, dtype=np.int64)
+    data = {
+        key: np.asarray(value)[time_idx, env_idx]
+        for key, value in traj.items() if key != "valid"
+    }
+    data["trajectory_id"] = (trajectory_id_base + env_idx).astype(np.int32)
+    data["step_id"] = (step_base[env_idx] + time_idx).astype(np.int32)
+    for key in ("instruction_idx", "task_idx"):
+        data[key] = data[key].astype(np.int32)
+    data["actions"] = data["actions"].astype(np.int32)
+    data["instruction_done"] = data["instruction_done"].astype(np.float32)
     parts_dir.mkdir(parents=True, exist_ok=True)
     part_path = parts_dir / f"part_{part_idx:06d}.npz"
-    trajectory_id = np.asarray([r["trajectory_id"] for r in rows], dtype=np.int32)
-    step_id = np.asarray([r["step_id"] for r in rows], dtype=np.int32)
-    obs = np.stack([r["obs"] for r in rows], axis=0).astype(np.float32)
-    actions = np.stack([r["actions"] for r in rows], axis=0).astype(np.int32)
-    rewards = np.stack([r["rewards"] for r in rows], axis=0).astype(np.float32)
-    dones = np.stack([r["dones"] for r in rows], axis=0).astype(np.bool_)
-    done_all = np.asarray([r["done_all"] for r in rows], dtype=np.bool_)
-    instruction_done = np.asarray([r["instruction_done"] for r in rows], dtype=np.float32)
-    instruction_idx = np.asarray([r["instruction_idx"] for r in rows], dtype=np.int32)
-    task_idx = np.asarray([r["task_idx"] for r in rows], dtype=np.int32)
-
-    np.savez_compressed(
-        part_path,
-        trajectory_id=trajectory_id,
-        step_id=step_id,
-        obs=obs,
-        actions=actions,
-        rewards=rewards,
-        dones=dones,
-        done_all=done_all,
-        instruction_done=instruction_done,
-        instruction_idx=instruction_idx,
-        task_idx=task_idx,
-    )
-    print(
-        f"Saved part {part_idx:06d}: {part_path} "
-        f"(rows={trajectory_id.shape[0]}, traj_id=[{trajectory_id.min()}..{trajectory_id.max()}])"
-    )
-    return {"path": str(part_path), "num_rows": int(trajectory_id.shape[0])}
+    np.savez_compressed(part_path, **data)
+    print(f"Saved part {part_idx:06d}: {part_path} (rows={len(env_idx)})", flush=True)
+    return {"path": str(part_path), "num_rows": int(len(env_idx))}, counts
 
 
 def main():
@@ -421,6 +257,10 @@ def main():
         default=2000,
         help="Flush rows to disk every N collected trajectories",
     )
+    parser.add_argument("--rollout-steps", type=int, default=128,
+                        help="Maximum JAX rollout block length (limits device memory)")
+    parser.add_argument("--compact-observations", action="store_true",
+                        help="Store instruction embeddings once in a separate NPZ table")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--greedy",
@@ -516,20 +356,24 @@ def main():
     save_every_trajectories = int(args.save_every_trajectories)
     if save_every_trajectories <= 0:
         raise ValueError("--save-every-trajectories must be > 0")
+    print("Note: parts are now written every rollout block; --save-every-trajectories is ignored.")
 
+    if args.num_trajectories <= 0 or args.max_steps <= 0 or args.rollout_steps <= 0:
+        raise ValueError("--num-trajectories, --max-steps and --rollout-steps must be > 0")
+    rollout_steps = min(args.rollout_steps, args.max_steps)
     rollout_fn = build_rollout_fn(
         env=env,
         actor_network=actor_network,
         actor_params=actor_params,
         num_envs=num_envs_collect,
-        max_steps=int(args.max_steps),
+        max_steps=rollout_steps,
         greedy=bool(args.greedy),
+        compact_obs=bool(args.compact_observations),
+        instruction_dim=int(env.instruction_dim),
     )
 
     rng = jax.random.PRNGKey(args.seed)
-    chunk_rows = []
     trajectories_done = 0
-    trajectories_since_last_flush = 0
     total_steps_collected = 0
     total_len_sum = 0
     min_len = None
@@ -539,62 +383,64 @@ def main():
     output_base = Path(output_path)
     parts_dir = output_base.with_suffix("").parent / f"{output_base.with_suffix('').name}_parts"
     parts_manifest = []
+    if parts_dir.exists() or output_base.with_suffix(".meta.json").exists() or output_base.with_suffix(".embeddings.npz").exists():
+        raise FileExistsError(f"Dataset output already exists for {output_base}; choose a new --output")
 
     num_agents = env.num_agents
     num_actors_collect = num_agents * num_envs_collect
 
-    while trajectories_done < args.num_trajectories:
-        remaining = args.num_trajectories - trajectories_done
-        take_in_batch = min(num_envs_collect, remaining)
+    # Store the exact embeddings used in this process; no model re-encoding is needed.
+    embedding_path = None
+    if args.compact_observations:
+        embeddings = np.asarray(env.scenario_handler.scenario_data_jax.embeddings_list,
+                                dtype=np.float32).reshape((-1, env.instruction_dim))
+        embedding_path = output_base.with_suffix(".embeddings.npz")
+        embedding_path.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(embedding_path, embeddings=embeddings)
 
+    # Files contain rollout blocks. An episode can span multiple parts.
+    while trajectories_done < args.num_trajectories:
+        take_in_batch = min(num_envs_collect, args.num_trajectories - trajectories_done)
         rng, reset_rng = jax.random.split(rng)
         reset_keys = jax.random.split(reset_rng, num_envs_collect)
-        reset_fn = lambda k: env.reset(k, instruction_idx=fixed_instruction_idx)
-        obs_batch, env_state_batch = jax.vmap(reset_fn)(reset_keys)
-
+        obs_batch, env_state_batch = jax.vmap(
+            lambda k: env.reset(k, instruction_idx=fixed_instruction_idx)
+        )(reset_keys)
         hstate = ScannedRNN.initialize_carry(
             num_actors_collect, actor_network.config["GRU_HIDDEN_DIM"]
         )
         last_done = jnp.zeros((num_actors_collect,), dtype=bool)
-
         rng, rollout_rng = jax.random.split(rng)
-        _, traj = rollout_fn(env_state_batch, obs_batch, last_done, hstate, rollout_rng)
-        traj_np = jax.device_get(traj)
-
-        batch_rows, batch_lens = collect_rows_from_batched_rollout(
-            traj_np=traj_np,
-            trajectory_id_base=trajectories_done,
-            num_trajectories_to_take=take_in_batch,
-        )
-        chunk_rows.extend(batch_rows)
-        total_steps_collected += len(batch_rows)
-        total_len_sum += int(sum(batch_lens))
-        if batch_lens:
-            batch_min = int(min(batch_lens))
-            batch_max = int(max(batch_lens))
-            min_len = batch_min if min_len is None else min(min_len, batch_min)
-            max_len = max(max_len, batch_max)
-        trajectories_done += take_in_batch
-        trajectories_since_last_flush += take_in_batch
-
-        # Flush chunk to disk to avoid RAM growth.
-        if (
-            trajectories_since_last_flush >= save_every_trajectories
-            or trajectories_done == args.num_trajectories
-        ):
+        carry = (env_state_batch, obs_batch, last_done, hstate, rollout_rng,
+                 jnp.arange(num_envs_collect) < take_in_batch)
+        lengths = np.zeros(take_in_batch, dtype=np.int64)
+        steps_run = 0
+        while steps_run < args.max_steps:
+            # The final block may be padded; rows beyond max_steps are discarded.
+            carry, traj = rollout_fn(carry)
+            traj_np = jax.device_get(traj)
+            block_len = min(rollout_steps, args.max_steps - steps_run)
+            if block_len != rollout_steps:
+                traj_np = {key: value[:block_len] for key, value in traj_np.items()}
             part_idx += 1
-            part_info = save_dataset_part(chunk_rows, parts_dir=parts_dir, part_idx=part_idx)
-            if part_info["path"] is not None:
-                parts_manifest.append(part_info)
-            chunk_rows = []
-            trajectories_since_last_flush = 0
-
-        if trajectories_done % 10 == 0 or trajectories_done == args.num_trajectories:
-            mean_len = float(total_len_sum / max(trajectories_done, 1))
-            print(
-                f"[{trajectories_done}/{args.num_trajectories}] "
-                f"steps_collected={total_steps_collected}, mean_len={mean_len:.1f}"
+            part, counts = save_rollout_part(
+                traj_np, parts_dir, part_idx, trajectories_done, take_in_batch, lengths
             )
+            if part:
+                parts_manifest.append(part)
+                total_steps_collected += part["num_rows"]
+            lengths += counts
+            steps_run += block_len
+            if not np.asarray(jax.device_get(carry[-1]))[:take_in_batch].any():
+                break
+        total_len_sum += int(lengths.sum())
+        batch_min, batch_max = int(lengths.min()), int(lengths.max())
+        min_len = batch_min if min_len is None else min(min_len, batch_min)
+        max_len = max(max_len, batch_max)
+        trajectories_done += take_in_batch
+        print(f"[{trajectories_done}/{args.num_trajectories}] "
+              f"steps_collected={total_steps_collected}, "
+              f"mean_len={total_len_sum / trajectories_done:.1f}", flush=True)
 
     if total_steps_collected == 0:
         raise RuntimeError("No transitions were collected (empty dataset).")
@@ -620,10 +466,16 @@ def main():
         "avg_trajectory_len": avg_len,
         "min_trajectory_len": int(min_len if min_len is not None else 0),
         "max_trajectory_len": int(max_len),
-        "output_mode": "chunked_npz_parts",
+        "output_mode": "rollout_block_npz_parts",
+        "format_version": 2,
+        "rollout_steps": rollout_steps,
+        "compact_observations": bool(args.compact_observations),
+        "instruction_dim": int(env.instruction_dim),
+        "embeddings_path": str(embedding_path) if embedding_path else None,
+        "parts_may_split_trajectories": True,
         "parts_dir": str(parts_dir),
         "parts": parts_manifest,
-        "save_every_trajectories": int(save_every_trajectories),
+        "save_every_trajectories": None,
     }
 
     meta_path = output_base.with_suffix(".meta.json")
@@ -650,7 +502,7 @@ def main():
             enabled=bool(args.hf_upload),
         )
         upload_files_to_hub(
-            [meta_path],
+            [meta_path] + ([embedding_path] if embedding_path else []),
             repo_id=args.hf_repo_id,
             repo_type="dataset",
             path_in_repo_prefix="",
