@@ -17,3 +17,4 @@ jaxmarl
 seaborn
 huggingface_hub
 comet_ml
+pyarrow==17.0.0

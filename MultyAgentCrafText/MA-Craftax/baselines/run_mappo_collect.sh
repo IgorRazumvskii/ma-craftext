@@ -20,10 +20,11 @@ python baselines/collect_expert_trajectories_mappo.py \
   --num-trajectories "${COLLECT_NUM_TRAJECTORIES:-4}" \
   --num-envs-collect "${COLLECT_NUM_ENVS:-2}" \
   --rollout-steps "${COLLECT_ROLLOUT_STEPS:-128}" \
+  --shard-size-mib "${COLLECT_SHARD_SIZE_MIB:-32}" \
   --max-steps "${COLLECT_MAX_STEPS:-2000}" \
   --seed "${COLLECT_SEED:-0}" \
   --compact-observations \
-  --output "$run_dir/$run_name.npz" \
+  --output "$run_dir/$run_name.parquet" \
   --hf-upload --hf-stream-upload \
   --hf-repo-id "$HF_DATASET_REPO_ID" "$@"
 

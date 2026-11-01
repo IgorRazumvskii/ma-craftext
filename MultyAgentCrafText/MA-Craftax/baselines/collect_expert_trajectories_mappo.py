@@ -1,7 +1,7 @@
 """
 Collect expert trajectories from the latest MAPPO checkpoint.
 
-Dataset contains per-step transitions with:
+Dataset contains successful per-step transitions in Parquet shards with:
 - observations of all agents,
 - actions of all agents,
 - rewards of all agents,
@@ -12,7 +12,7 @@ Usage examples:
     python baselines/collect_expert_trajectories_mappo.py \
       --checkpoint-dir runs/.../checkpoints \
       --num-trajectories 200 \
-      --output datasets/expert_mappo.npz
+      --output datasets/expert_mappo.parquet
 
     python baselines/collect_expert_trajectories_mappo.py \
       --checkpoint runs/.../checkpoints/mappo_model_update_1200.pkl \
@@ -233,7 +233,8 @@ def prepare_stream_upload(repo_id, private, parts_dir, output_base):
     api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
     existing = api.list_repo_files(repo_id=repo_id, repo_type="dataset")
     reserved = {output_base.with_suffix(".meta.json").name,
-                output_base.with_suffix(".embeddings.npz").name}
+                output_base.with_suffix(".embeddings.npz").name,
+                output_base.with_suffix(".embeddings.parquet").name}
     if any(path.startswith(parts_dir.name + "/") or path in reserved for path in existing):
         raise FileExistsError("Dataset name already exists on Hugging Face; choose a new --output")
     return api, repo_id
@@ -268,7 +269,7 @@ def main():
         "--output",
         type=str,
         default=None,
-        help="Output .npz file path (default: datasets/expert_mappo_<timestamp>.npz)",
+        help="Output prefix (default: datasets/expert_mappo_<timestamp>.parquet)",
     )
     parser.add_argument("--num-trajectories", type=int, default=100,
                         help="Number of successful trajectories to collect")
@@ -287,6 +288,7 @@ def main():
         default=2000,
         help="Flush rows to disk every N collected trajectories",
     )
+    parser.add_argument("--shard-size-mib", type=int, default=32, help="Target uncompressed data per Parquet shard in MiB; flushes after an episode")
     parser.add_argument("--rollout-steps", type=int, default=128,
                         help="Maximum JAX rollout block length (limits device memory)")
     parser.add_argument("--compact-observations", action="store_true",
@@ -382,7 +384,7 @@ def main():
 
     if args.output is None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = f"datasets/expert_mappo_{ts}.npz"
+        output_path = f"datasets/expert_mappo_{ts}.parquet"
     else:
         output_path = args.output
 
@@ -392,10 +394,10 @@ def main():
     save_every_trajectories = int(args.save_every_trajectories)
     if save_every_trajectories <= 0:
         raise ValueError("--save-every-trajectories must be > 0")
-    print("Note: parts are now written every rollout block; --save-every-trajectories is ignored.")
+    print("Note: --save-every-trajectories is ignored; Parquet shards are controlled by --shard-size-mib.")
 
-    if args.num_trajectories <= 0 or args.max_steps <= 0 or args.rollout_steps <= 0 or args.max_attempts < 0:
-        raise ValueError("--num-trajectories, --max-steps and --rollout-steps must be > 0; --max-attempts must be >= 0")
+    if args.num_trajectories <= 0 or args.max_steps <= 0 or args.rollout_steps <= 0 or args.max_attempts < 0 or args.shard_size_mib <= 0:
+        raise ValueError("--num-trajectories, --max-steps and --rollout-steps must be > 0; --max-attempts must be >= 0 and --shard-size-mib > 0")
     rollout_steps = min(args.rollout_steps, args.max_steps)
     rollout_fn = build_rollout_fn(
         env=env,
@@ -421,11 +423,10 @@ def main():
 
     output_base = Path(output_path)
     parts_dir = output_base.with_suffix("").parent / f"{output_base.with_suffix('').name}_parts"
-    parts_manifest = []
     pending_dir = output_base.with_suffix("").parent / f"{output_base.with_suffix('').name}_pending"
     if pending_dir.exists():
         raise FileExistsError(f"Pending trajectory directory already exists: {pending_dir}")
-    if parts_dir.exists() or output_base.with_suffix(".meta.json").exists() or output_base.with_suffix(".embeddings.npz").exists():
+    if parts_dir.exists() or output_base.with_suffix(".meta.json").exists() or output_base.with_suffix(".embeddings.npz").exists() or output_base.with_suffix(".embeddings.parquet").exists():
         raise FileExistsError(f"Dataset output already exists for {output_base}; choose a new --output")
 
     num_agents = env.num_agents
@@ -438,14 +439,21 @@ def main():
             args.hf_repo_id, not args.hf_public, parts_dir, output_base
         )
 
+    from trajectory_parquet import ShardWriter, write_embeddings
+    def upload_shard(path):
+        stream_upload_file(stream_api, stream_repo, path, f"{parts_dir.name}/{path.name}")
+    writer = ShardWriter(parts_dir, args.shard_size_mib * 1024 * 1024,
+                         on_upload=upload_shard if stream_api is not None else None)
+    parts_manifest = writer.parts
+
     # Store the exact embeddings used in this process; no model re-encoding is needed.
     embedding_path = None
     if args.compact_observations:
         embeddings = np.asarray(env.scenario_handler.scenario_data_jax.embeddings_list,
                                 dtype=np.float32).reshape((-1, env.instruction_dim))
-        embedding_path = output_base.with_suffix(".embeddings.npz")
+        embedding_path = output_base.with_suffix(".embeddings.parquet")
         embedding_path.parent.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(embedding_path, embeddings=embeddings)
+        write_embeddings(embedding_path, embeddings)
         if stream_api is not None:
             stream_upload_file(stream_api, stream_repo, embedding_path, embedding_path.name)
 
@@ -499,18 +507,14 @@ def main():
                 success = bool(np.any(done & (episode_chunk["instruction_done"][:, 0] > 0)))
                 terminal = bool(done.any())
                 if success:
-                    # All fragments become visible only after success was observed.
-                    parts_dir.mkdir(parents=True, exist_ok=True)
+                    # Write successful fragments into a bounded-memory shard.
                     for item in pending[env_idx]:
                         src = Path(item["path"])
-                        dst = parts_dir / src.name
-                        src.replace(dst)
-                        item["path"] = str(dst)
-                        if stream_api is not None:
-                            stream_upload_file(stream_api, stream_repo, dst,
-                                               f"{parts_dir.name}/{dst.name}")
-                        parts_manifest.append(item)
+                        with np.load(src, allow_pickle=False) as fragment:
+                            writer.write({key: fragment[key] for key in fragment.files})
                         total_steps_collected += item["num_rows"]
+                        src.unlink()
+                    writer.maybe_flush()
                     length = int(lengths[env_idx])
                     total_len_sum += length
                     min_len = length if min_len is None else min(min_len, length)
@@ -534,6 +538,7 @@ def main():
     if pending_dir.exists():
         pending_dir.rmdir()
     complete = trajectories_done == args.num_trajectories
+    writer.flush()
     if total_steps_collected == 0:
         raise RuntimeError("No transitions were collected (empty dataset).")
 
@@ -565,13 +570,15 @@ def main():
         "avg_trajectory_len": avg_len,
         "min_trajectory_len": int(min_len if min_len is not None else 0),
         "max_trajectory_len": int(max_len),
-        "output_mode": "rollout_block_npz_parts",
-        "format_version": 2,
+        "output_mode": "parquet_shards",
+        "format_version": 3,
+        "shard_target_uncompressed_bytes": int(args.shard_size_mib * 1024 * 1024),
+        "parquet_compression": "zstd",
         "rollout_steps": rollout_steps,
         "compact_observations": bool(args.compact_observations),
         "instruction_dim": int(env.instruction_dim),
         "embeddings_path": str(embedding_path) if embedding_path else None,
-        "parts_may_split_trajectories": True,
+        "parts_may_split_trajectories": False,
         "parts_dir": str(parts_dir),
         "parts": parts_manifest,
         "save_every_trajectories": None,

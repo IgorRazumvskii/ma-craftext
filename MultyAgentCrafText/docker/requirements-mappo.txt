@@ -31,3 +31,6 @@ tqdm==4.66.5
 comet-ml==3.47.6
 wandb==0.13.11
 huggingface-hub==0.24.7
+
+# Parquet trajectory storage.
+pyarrow==17.0.0

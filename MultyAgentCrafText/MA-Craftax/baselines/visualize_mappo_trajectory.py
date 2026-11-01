@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render saved Craftax-Coop symbolic MAPPO observations to an animated GIF.
+"""Render saved NPZ or Parquet Craftax-Coop MAPPO observations to an animated GIF.
 
 The frames show observations *before* each recorded action. The dataset does
 not contain complete world states or the observation after the final action.
@@ -13,6 +13,7 @@ import textwrap
 from pathlib import Path
 
 import numpy as np
+from read_mappo_parts import iter_parts
 from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -66,22 +67,20 @@ def part_paths(meta_path, meta):
 
 def list_trajectories(meta_path, meta):
     result = {}
-    for path in part_paths(meta_path, meta):
-        with np.load(path, allow_pickle=False) as data:
-            for tid in np.unique(data["trajectory_id"]):
-                tid = int(tid)
-                mask = data["trajectory_id"] == tid
-                entry = result.setdefault(tid, {"steps": 0, "task_idx": int(data["task_idx"][mask][0]), "success": False})
-                entry["steps"] += int(mask.sum())
-                entry["success"] |= bool(np.any(data["instruction_done"][mask] > 0))
+    for data in iter_parts(meta_path, restore_obs=False):
+        for tid in np.unique(data["trajectory_id"]):
+            tid = int(tid)
+            mask = data["trajectory_id"] == tid
+            entry = result.setdefault(tid, {"steps": 0, "task_idx": int(data["task_idx"][mask][0]), "success": False})
+            entry["steps"] += int(mask.sum())
+            entry["success"] |= bool(np.any(data["instruction_done"][mask] > 0))
     return result
 
 
 def read_frames(meta_path, meta, tid, every, max_frames):
     frames = []
     seen = set()
-    for path in part_paths(meta_path, meta):
-        with np.load(path, allow_pickle=False) as data:
+    for data in iter_parts(meta_path, restore_obs=False):
             rows = np.flatnonzero(data["trajectory_id"] == tid)
             for i in rows:
                 step = int(data["step_id"][i])
