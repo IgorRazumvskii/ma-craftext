@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter, OrderedDict
 import hashlib
+import io
 import json
 from pathlib import Path
 import sqlite3
@@ -169,6 +170,58 @@ def scan(parts, db, mapping, skip_bad):
     return valid, bad, len(episodes)
 
 
+class HubSplitWriter:
+    """Upload bounded in-memory JSONL shards; never create output files locally."""
+    def __init__(self, api, repo_id, split, limit):
+        self.api, self.repo_id, self.split, self.limit = api, repo_id, split, limit
+        self.buffer = io.BytesIO()
+        self.index = 0
+
+    def write(self, text):
+        data = text.encode('utf-8')
+        if self.buffer.tell() and self.buffer.tell() + len(data) > self.limit:
+            self.flush()
+        self.buffer.write(data)
+
+    def flush(self):
+        if not self.buffer.tell():
+            return
+        name = f'data/{self.split}-{self.index:05d}.jsonl'
+        self.buffer.seek(0)
+        self.api.upload_file(path_or_fileobj=self.buffer, path_in_repo=name,
+                             repo_id=self.repo_id, repo_type='dataset',
+                             commit_message=f'Upload {name}')
+        print(f'Uploaded {name}', file=sys.stderr, flush=True)
+        self.index += 1
+        self.buffer.close()
+        self.buffer = io.BytesIO()
+
+    def close(self):
+        self.flush()
+        self.buffer.close()
+
+    def abort(self):
+        self.buffer.close()
+
+
+def hub_dataset_card(counts):
+    splits = ''.join(f'      - split: {name}\n        path: data/{name}-*.jsonl\n'
+                     for name in ('train', 'validation', 'test') if counts[name])
+    return '''---
+configs:
+  - config_name: default
+    data_files:
+''' + splits + '''---
+
+# MAPPO trajectories converted to per-agent SFT examples
+
+Each record contains `messages` and provenance `metadata`. Observations are local
+and precede the target action. Splits are assigned by trajectory ID. The source
+contains successful team episodes, not verified optimal actions or reasoning.
+See `report.json` for provenance, limitations and conversion statistics.
+'''
+
+
 def build(args):
     parts = sorted(args.parts.expanduser().resolve().glob('*.parquet'))
     if args.max_shards: parts = parts[:args.max_shards]
@@ -178,15 +231,24 @@ def build(args):
     if dimensions != (9, 11) or len(classes['BlockType']) != 37 or len(classes['ItemType']) != 5:
         raise ValueError('Unsupported observation layout')
     renderer = Renderer(config_name='mappo_sft')
-    output = args.output.expanduser().resolve()
-    output.mkdir(parents=True, exist_ok=False)
+    output = args.output.expanduser().resolve() if args.output else None
+    if output is not None:
+        output.mkdir(parents=True, exist_ok=False)
     counts, action_counts, role_counts, task_counts, skipped_dead = Counter(), Counter(), Counter(), Counter(), 0
     with tempfile.TemporaryDirectory(prefix='mappo_sft_') as tmp, sqlite3.connect(str(Path(tmp)/'index.sqlite')) as db:
         db.execute('CREATE TABLE steps (tid INTEGER, step INTEGER, actions TEXT, PRIMARY KEY (tid, step)) WITHOUT ROWID')
         valid, bad, total = scan(parts, db, mapping, args.skip_unreadable)
         if not valid: raise ValueError('No complete successful episodes found in readable shards')
         unreadable = {x['file'] for x in bad}
-        files = {name: (output / f'{name}.jsonl').open('x', encoding='utf-8') for name in ('train', 'validation', 'test')}
+        api = None
+        if args.hf_repo_id:
+            from huggingface_hub import HfApi
+            api = HfApi()
+            # Refuse to overwrite or mix with any existing repository.
+            api.create_repo(repo_id=args.hf_repo_id, repo_type='dataset', private=not args.hf_public, exist_ok=False)
+            files = {name: HubSplitWriter(api, args.hf_repo_id, name, args.hf_shard_mib * 1024 * 1024) for name in ('train', 'validation', 'test')}
+        else:
+            files = {name: (output / f'{name}.jsonl').open('x', encoding='utf-8') for name in ('train', 'validation', 'test')}
         cache = OrderedDict()
         try:
             for idx, path in enumerate(parts, 1):
@@ -223,10 +285,26 @@ def build(args):
                             role_counts[role] += 1
                             task_counts[tasks[ep['task']]] += 1
                 if idx % 100 == 0: print(f'Converted {idx}/{len(parts)} shards; {sum(counts.values())} examples', file=sys.stderr, flush=True)
-        finally:
-            for f in files.values(): f.close()
+        except BaseException:
+            for f in files.values():
+                if api is not None:
+                    f.abort()
+                else:
+                    f.close()
+            raise
+        for f in files.values():
+            f.close()
     report = {'source_parts': str(args.parts.resolve()), 'scenario_file': str(args.scenario_file.resolve()), 'scenario_sha256': hashlib.sha256(args.scenario_file.read_bytes()).hexdigest(), 'constants_file': str(args.constants_file.resolve()), 'constants_sha256': hashlib.sha256(args.constants_file.read_bytes()).hexdigest(), 'scenario_note': 'Reconstructed from current source; instruction/task ID consistency was checked, but original metadata was unavailable.', 'shards_scanned': len(parts), 'unreadable_shards': bad, 'trajectories_seen': total, 'complete_successful_trajectories': len(valid), 'rejected_trajectories': total-len(valid), 'examples': {k: counts[k] for k in ('train', 'validation', 'test')}, 'actions': dict(action_counts.most_common()), 'roles': dict(role_counts), 'tasks': dict(task_counts), 'action_ids': {action_name(i, classes['Action']): i for i in sorted(set(COMMON + BUILDER + [54, 55]))}, 'dead_agent_steps_skipped': skipped_dead, 'seed': args.seed, 'validation_fraction': args.val_fraction, 'test_fraction': args.test_fraction, 'history_length': args.history}
-    (output / 'report.json').write_text(json.dumps(report, ensure_ascii=False, indent=2)+'\n', encoding='utf-8')
+    report['hf_repo_id'] = args.hf_repo_id
+    report['source_hf_repo_id'] = args.source_hf_repo_id
+    report['source_hf_revision'] = args.source_hf_revision
+    report_bytes = (json.dumps(report, ensure_ascii=False, indent=2)+'\n').encode('utf-8')
+    if api is not None:
+        api.upload_file(path_or_fileobj=report_bytes, path_in_repo='report.json', repo_id=args.hf_repo_id, repo_type='dataset', commit_message='Upload conversion report')
+        # Publish card last. Its presence indicates the conversion reached completion.
+        api.upload_file(path_or_fileobj=hub_dataset_card(counts).encode('utf-8'), path_in_repo='README.md', repo_id=args.hf_repo_id, repo_type='dataset', commit_message='Publish completed dataset card')
+    else:
+        (output / 'report.json').write_bytes(report_bytes)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
@@ -235,7 +313,13 @@ def main():
     p.add_argument('--parts', type=Path, default=DEFAULT_PARTS)
     p.add_argument('--scenario-file', type=Path, default=DEFAULT_SCENARIOS)
     p.add_argument('--constants-file', type=Path, default=CRAFTAX/'craftax/craftax_together_talens/constants.py')
-    p.add_argument('--output', type=Path, required=True, help='New output directory; never overwrite existing output')
+    destination = p.add_mutually_exclusive_group(required=True)
+    destination.add_argument('--output', type=Path, help='New local output directory; never overwrite existing output')
+    destination.add_argument('--hf-repo-id', help='New Hugging Face dataset repository owner/name')
+    p.add_argument('--hf-public', action='store_true', help='Create the new Hub repository public (default: private)')
+    p.add_argument('--hf-shard-mib', type=int, default=64, help='Approximate uncompressed JSONL shard size in MiB')
+    p.add_argument('--source-hf-repo-id', help='Source repository ID to record in report (does not download data)')
+    p.add_argument('--source-hf-revision', help='Source repository revision to record in report')
     p.add_argument('--history', type=int, default=5)
     p.add_argument('--seed', type=int, default=42)
     p.add_argument('--val-fraction', type=float, default=.05)
@@ -243,7 +327,8 @@ def main():
     p.add_argument('--max-shards', type=int, default=0, help='Limit input for smoke testing; 0 means all')
     p.add_argument('--skip-unreadable', action='store_true', help='Skip and report unreadable shards instead of failing')
     args = p.parse_args()
-    if args.history < 0 or args.max_shards < 0 or not (0 <= args.val_fraction < 1 and 0 <= args.test_fraction < 1 and args.val_fraction + args.test_fraction < 1): p.error('Invalid history, shard limit, or split fractions')
+    if args.history < 0 or args.max_shards < 0 or args.hf_shard_mib < 1 or not (0 <= args.val_fraction < 1 and 0 <= args.test_fraction < 1 and args.val_fraction + args.test_fraction < 1): p.error('Invalid history, shard limit, shard size, or split fractions')
+    if args.hf_public and not args.hf_repo_id: p.error('--hf-public requires --hf-repo-id')
     build(args)
 
 
