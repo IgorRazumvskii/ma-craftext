@@ -7,8 +7,10 @@ from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import sys
+import time
 
 from huggingface_hub import HfApi, snapshot_download
+from requests.exceptions import HTTPError
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(os.environ.get('SFT_DATA_DIR', '/data'))
@@ -19,6 +21,26 @@ def setting_bool(name: str, default: str) -> bool:
     if value not in ('0', '1'):
         raise ValueError(f'{name} must be 0 or 1')
     return value == '1'
+
+
+def retry_rate_limit(operation, description: str):
+    """Wait out HF's five-minute API window; keep completed local downloads."""
+    attempts = 12
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except HTTPError as exc:
+            response = exc.response
+            if response is None or response.status_code != 429 or attempt == attempts:
+                raise
+            try:
+                retry_after = int(response.headers.get('Retry-After', '0'))
+            except ValueError:
+                retry_after = 0
+            delay = max(310, retry_after)
+            print(f'HF rate limit during {description}; waiting {delay}s before '
+                  f'retry {attempt + 1}/{attempts}', file=sys.stderr, flush=True)
+            time.sleep(delay)
 
 
 def run() -> None:
@@ -45,10 +67,14 @@ def run() -> None:
     (DATA / 'tmp').mkdir(exist_ok=True)
     os.environ['TMPDIR'] = str(DATA / 'tmp')
     api = HfApi()
-    revision = api.repo_info(source, repo_type='dataset', revision=requested_revision).sha
+    revision = retry_rate_limit(
+        lambda: api.repo_info(source, repo_type='dataset', revision=requested_revision),
+        'reading source revision').sha
     if not revision or not re.fullmatch(r'[0-9a-f]{40}', revision):
         raise ValueError('HF returned an invalid source commit SHA')
-    remote_files = api.list_repo_files(source, repo_type='dataset', revision=revision)
+    remote_files = retry_rate_limit(
+        lambda: api.list_repo_files(source, repo_type='dataset', revision=revision),
+        'listing source files')
     parents = sorted({str(PurePosixPath(f).parent) for f in remote_files
                       if f.endswith('.parquet') and (
                           str(PurePosixPath(f).parent) == str(folder_path)
@@ -64,8 +90,11 @@ def run() -> None:
     # A separate local directory per commit prevents leftover shards from older snapshots.
     snapshot_dir = DATA / 'snapshots' / revision
     print(f'Source {source} at {revision}: downloading {len(expected)} shards', flush=True)
-    snapshot_download(repo_id=source, repo_type='dataset', revision=revision,
-                      local_dir=snapshot_dir, allow_patterns=[f'{parent}/*.parquet'])
+    retry_rate_limit(
+        lambda: snapshot_download(repo_id=source, repo_type='dataset', revision=revision,
+                                  local_dir=snapshot_dir, allow_patterns=[f'{parent}/*.parquet'],
+                                  max_workers=2),
+        'downloading source files')
     parts = snapshot_dir / parent
     actual = {f.name for f in parts.glob('*.parquet')}
     if actual != expected:
