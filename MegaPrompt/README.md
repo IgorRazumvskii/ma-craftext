@@ -2,6 +2,10 @@
 
 Prompt rendering and benchmark utilities for CraftText-style agent prompts.
 
+For converting MAPPO trajectories to an LLM dataset and streaming it to a new
+Hugging Face dataset repository with Docker, see
+[`scripts/README_server_hf.md`](scripts/README_server_hf.md).
+
 ## What is in this folder
 
 - `craftext_prompt/templates/` - Prompt templates (`.txt`) and YAML render configs (`craftext.yaml`).
