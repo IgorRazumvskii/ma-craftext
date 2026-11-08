@@ -24,14 +24,16 @@ def setting_bool(name: str, default: str) -> bool:
 def run() -> None:
     source = os.environ.get('SFT_SOURCE_REPO', 'igor69raz/ma-craftax-dataset')
     requested_revision = os.environ.get('SFT_SOURCE_REVISION', 'main')
-    folder = os.environ.get('SFT_SOURCE_FOLDER', 'mappo_100k_20261101_210728_parts')
+    folder = os.environ.get('SFT_SOURCE_FOLDER', 'mappo_100k_20261101_210728/parts')
     output = os.environ.get('SFT_OUTPUT_REPO', '')
     if not os.environ.get('HF_TOKEN'):
         raise ValueError('HF_TOKEN is required')
     if not output or '/' not in output or output == source:
         raise ValueError('SFT_OUTPUT_REPO must be a new owner/name, different from the source')
-    if not folder or PurePosixPath(folder).name != folder:
-        raise ValueError('SFT_SOURCE_FOLDER must be a directory name, not a path')
+    folder_path = PurePosixPath(folder)
+    if (not folder or folder_path.is_absolute() or '..' in folder_path.parts
+            or any(ch in folder for ch in '*?[')):
+        raise ValueError('SFT_SOURCE_FOLDER must be a relative folder path without glob patterns')
     shard_mib = int(os.environ.get('SFT_SHARD_MIB', '64'))
     max_shards = int(os.environ.get('SFT_MAX_SHARDS', '0'))
     if shard_mib < 1 or max_shards < 0:
@@ -48,9 +50,14 @@ def run() -> None:
         raise ValueError('HF returned an invalid source commit SHA')
     remote_files = api.list_repo_files(source, repo_type='dataset', revision=revision)
     parents = sorted({str(PurePosixPath(f).parent) for f in remote_files
-                      if f.endswith('.parquet') and PurePosixPath(f).parent.name == folder})
+                      if f.endswith('.parquet') and (
+                          str(PurePosixPath(f).parent) == str(folder_path)
+                          if len(folder_path.parts) > 1
+                          else PurePosixPath(f).parent.name == folder)})
     if len(parents) != 1:
-        raise ValueError(f'Expected one source folder named {folder!r}; found {parents}')
+        parquet_dirs = sorted({str(PurePosixPath(f).parent) for f in remote_files if f.endswith('.parquet')})
+        raise ValueError(f'Expected one source folder named {folder!r}; found {parents}. '
+                         f'Parquet folders in {source}: {parquet_dirs}')
     parent = parents[0]
     expected = {PurePosixPath(f).name for f in remote_files
                 if str(PurePosixPath(f).parent) == parent and f.endswith('.parquet')}

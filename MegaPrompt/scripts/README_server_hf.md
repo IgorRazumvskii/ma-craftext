@@ -59,7 +59,7 @@ docker compose -f compose.sft.yaml ps -a
 # Источник и снимок; по умолчанию используется актуальный main.
 SFT_SOURCE_REPO=igor69raz/ma-craftax-dataset
 SFT_SOURCE_REVISION=main
-SFT_SOURCE_FOLDER=mappo_100k_20261101_210728_parts
+SFT_SOURCE_FOLDER=mappo_100k_20261101_210728/parts
 
 # Публичный репозиторий: 1. По умолчанию 0 (приватный).
 SFT_PUBLIC=0

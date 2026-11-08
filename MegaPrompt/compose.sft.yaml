@@ -9,7 +9,7 @@ services:
       HF_TOKEN: ${HF_TOKEN:?Set HF_TOKEN with Hugging Face read and write permissions}
       SFT_SOURCE_REPO: ${SFT_SOURCE_REPO:-igor69raz/ma-craftax-dataset}
       SFT_SOURCE_REVISION: ${SFT_SOURCE_REVISION:-main}
-      SFT_SOURCE_FOLDER: ${SFT_SOURCE_FOLDER:-mappo_100k_20261101_210728_parts}
+      SFT_SOURCE_FOLDER: ${SFT_SOURCE_FOLDER:-mappo_100k_20261101_210728/parts}
       SFT_OUTPUT_REPO: ${SFT_OUTPUT_REPO:?Set SFT_OUTPUT_REPO to a new dataset repo owner/name}
       SFT_PUBLIC: ${SFT_PUBLIC:-0}
       SFT_SKIP_UNREADABLE: ${SFT_SKIP_UNREADABLE:-1}
