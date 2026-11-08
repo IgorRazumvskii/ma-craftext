@@ -19,3 +19,5 @@ services:
       - type: bind
         source: ${SFT_WORK_DIR:-./sft-data}
         target: /data
+        bind:
+          create_host_path: true
