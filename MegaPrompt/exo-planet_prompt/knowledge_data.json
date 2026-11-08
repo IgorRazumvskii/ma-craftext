@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": 1,
+      "type": "ACTION",
+      "skill": "PLACE_REPLICATOR",
+      "recipe": "2 Biomass",
+      "rules": "requires 2 Biomass in inventory; face empty Regolith Turf or Survey Trail tile"
+    },
+    {
+      "id": 2,
+      "type": "RECIPE",
+      "skill": "bone_drill",
+      "recipe": "1 Biomass",
+      "rules": "Replicator deployed; agent adjacent and facing Replicator; use MAKE_BONE_DRILL"
+    },
+    {
+      "id": 3,
+      "type": "MECHANICS",
+      "skill": "biomass_gathering",
+      "recipe": "",
+      "rules": "adjacent to Xeno-Root Mass and facing it; EXTRACT; no drill required"
+    }
+  ]
+}

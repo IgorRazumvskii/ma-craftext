@@ -34,6 +34,12 @@ MANIFEST
 *.pickle
 *.npy
 *.npz
+*.parquet
+*.arrow
+*.feather
+*.jsonl
+*.safetensors
+*.ckpt
 
 # TensorBoard/ML logs
 events.out.tfevents.*
@@ -42,6 +48,8 @@ events.out.tfevents.*
 # Data/log directories
 baselines/runs/
 baselines/videos_from_checkpoints/
+runs/
+videos_from_checkpoints/
 *.log
 *.csv
 
@@ -80,6 +88,9 @@ ipython_config.py
 
 # Environments
 .env
+.env.*
+!.env.example
+!.env.*.example
 .venv
 env/
 venv/
@@ -103,10 +114,21 @@ venv.bak/
 results/
 experiments/
 checkpoints/
+checkpoint/
 models/
+data/
+datasets/
+outputs/
 wandb/
 mlruns/
-EOF
+lightning_logs/
+tensorboard/
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+token.json
 MA-Craftax/baselines/.locks/
 MA-Craftax/baselines/models--distilbert-base-uncased/
 

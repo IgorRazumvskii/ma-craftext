@@ -1,0 +1,16 @@
+protocol:
+  - name: mappo_sft_v1
+    template: prompt.txt
+    renders:
+      goal:
+        placeholder: "{{goal}}"
+        renderer: just_a_goal
+      obs:
+        placeholder: "{{observation}}"
+        renderer: as_text
+      action_history:
+        placeholder: "{{history}}"
+        renderer: as_text
+      act:
+        placeholder: "{{actions}}"
+        renderer: bullet_list

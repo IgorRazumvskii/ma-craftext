@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": 1,
+      "type": "ACTION",
+      "skill": "PLACE_TABLE",
+      "recipe": "2 wood",
+      "rules": "requires 2 wood in inventory; must be adjacent to grass or path tile; agent must face the tile where the table is placed"
+    },
+    {
+      "id": 2,
+      "type": "RECIPE",
+      "skill": "wood_pickaxe",
+      "recipe": "1 wood",
+      "rules": "must have crafting table; must be adjacent to the crafting table; use MAKE_WOOD_PICKAXE action"
+    },
+    {
+      "id": 3,
+      "type": "MECHANICS",
+      "skill": "wood_gathering",
+      "recipe": "",
+      "rules": "when adjacent to a tree and facing it, use DO action to gather wood; no tool required"
+    }
+  ]
+}

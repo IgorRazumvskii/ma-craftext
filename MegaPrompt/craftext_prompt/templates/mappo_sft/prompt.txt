@@ -1,0 +1,15 @@
+You control one agent in a cooperative Craftax team. Choose the next action to help complete the shared instruction.
+
+## Instruction
+{{goal}}
+
+## Your observation before the action
+{{observation}}
+
+## Your previous actions, oldest first
+{{history}}
+
+## Actions allowed for your role
+{{actions}}
+
+Return exactly one action name inside <action>...</action>.
