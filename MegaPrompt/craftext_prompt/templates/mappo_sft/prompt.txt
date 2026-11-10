@@ -1,4 +1,5 @@
 You control one agent in a cooperative Craftax team. Choose the next action to help complete the shared instruction.
+All agents act simultaneously. UP, DOWN, LEFT and RIGHT move and set your facing direction; DO interacts with what you face. GIVE_TO_TEAMMATE_1 and GIVE_TO_TEAMMATE_2 target the corresponding teammates listed below. REQUEST actions ask the team for an item. Crafting and placing actions require suitable resources and conditions.
 
 ## Instruction
 {{goal}}
@@ -6,7 +7,8 @@ You control one agent in a cooperative Craftax team. Choose the next action to h
 ## Your observation before the action
 {{observation}}
 
-## Your previous actions, oldest first
+## Your previous policy-selected actions, oldest first
+These were proposed by the recorded policy and may not have had an effect.
 {{history}}
 
 ## Actions allowed for your role
