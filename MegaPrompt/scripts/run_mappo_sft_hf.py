@@ -10,7 +10,7 @@ import sys
 import time
 
 from huggingface_hub import HfApi, snapshot_download
-from requests.exceptions import HTTPError
+from requests.exceptions import ConnectionError, HTTPError, SSLError, Timeout
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = Path(os.environ.get('SFT_DATA_DIR', '/data'))
@@ -24,21 +24,33 @@ def setting_bool(name: str, default: str) -> bool:
 
 
 def retry_rate_limit(operation, description: str):
-    """Wait out HF's five-minute API window; keep completed local downloads."""
+    """Retry transient HF download errors while keeping completed local files."""
     attempts = 12
     for attempt in range(1, attempts + 1):
         try:
             return operation()
+        except SSLError:
+            # Certificate and TLS configuration failures need intervention.
+            raise
+        except (ConnectionError, Timeout) as exc:
+            if attempt == attempts:
+                raise
+            delay = min(5 * 2 ** (attempt - 1), 60)
+            print(f'HF connection error during {description} ({type(exc).__name__}); '
+                  f'waiting {delay}s before retry {attempt + 1}/{attempts}',
+                  file=sys.stderr, flush=True)
+            time.sleep(delay)
         except HTTPError as exc:
             response = exc.response
-            if response is None or response.status_code != 429 or attempt == attempts:
+            if response is None or response.status_code not in (429, 500, 502, 503, 504) or attempt == attempts:
                 raise
             try:
                 retry_after = int(response.headers.get('Retry-After', '0'))
             except ValueError:
                 retry_after = 0
-            delay = max(310, retry_after)
-            print(f'HF rate limit during {description}; waiting {delay}s before '
+            delay = max(310 if response.status_code == 429 else min(5 * 2 ** (attempt - 1), 60), retry_after)
+            reason = 'rate limit' if response.status_code == 429 else f'HTTP {response.status_code}'
+            print(f'HF {reason} during {description}; waiting {delay}s before '
                   f'retry {attempt + 1}/{attempts}', file=sys.stderr, flush=True)
             time.sleep(delay)
 
@@ -51,7 +63,7 @@ def run() -> None:
     if not os.environ.get('HF_TOKEN'):
         raise ValueError('HF_TOKEN is required')
     if not output or '/' not in output or output == source:
-        raise ValueError('SFT_OUTPUT_REPO must be a new owner/name, different from the source')
+        raise ValueError('SFT_OUTPUT_REPO must be an owner/name, different from the source')
     folder_path = PurePosixPath(folder)
     if (not folder or folder_path.is_absolute() or '..' in folder_path.parts
             or any(ch in folder for ch in '*?[')):
@@ -61,6 +73,9 @@ def run() -> None:
     if shard_mib < 1 or max_shards < 0:
         raise ValueError('SFT_SHARD_MIB must be positive and SFT_MAX_SHARDS nonnegative')
     public = setting_bool('SFT_PUBLIC', '0')
+    use_empty_repo = setting_bool('SFT_USE_EMPTY_REPO', '0')
+    if public and use_empty_repo:
+        raise ValueError('SFT_PUBLIC only controls creation of a new repository')
     skip_unreadable = setting_bool('SFT_SKIP_UNREADABLE', '1')
 
     DATA.mkdir(parents=True, exist_ok=True)
@@ -108,7 +123,9 @@ def run() -> None:
         cmd.append('--skip-unreadable')
     if public:
         cmd.append('--hf-public')
-    print(f'Converting to new dataset repository {output}', flush=True)
+    if use_empty_repo:
+        cmd.append('--hf-use-empty-repo')
+    print(f'Converting to dataset repository {output}', flush=True)
     subprocess.run(cmd, check=True)
     print(f'Completed: https://huggingface.co/datasets/{output}', flush=True)
 

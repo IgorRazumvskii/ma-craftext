@@ -244,8 +244,15 @@ def build(args):
         if args.hf_repo_id:
             from huggingface_hub import HfApi
             api = HfApi()
-            # Refuse to overwrite or mix with any existing repository.
-            api.create_repo(repo_id=args.hf_repo_id, repo_type='dataset', private=not args.hf_public, exist_ok=False)
+            if args.hf_use_empty_repo:
+                existing = set(api.list_repo_files(repo_id=args.hf_repo_id, repo_type='dataset'))
+                unexpected = existing - {'.gitattributes'}
+                if unexpected:
+                    raise ValueError(f'Existing repository {args.hf_repo_id} is not empty: {sorted(unexpected)[:20]}; refusing to write')
+                print(f'Using existing empty dataset repository {args.hf_repo_id}', file=sys.stderr, flush=True)
+            else:
+                # Refuse to overwrite or mix with any existing repository.
+                api.create_repo(repo_id=args.hf_repo_id, repo_type='dataset', private=not args.hf_public, exist_ok=False)
             files = {name: HubSplitWriter(api, args.hf_repo_id, name, args.hf_shard_mib * 1024 * 1024) for name in ('train', 'validation', 'test')}
         else:
             files = {name: (output / f'{name}.jsonl').open('x', encoding='utf-8') for name in ('train', 'validation', 'test')}
@@ -316,6 +323,7 @@ def main():
     destination = p.add_mutually_exclusive_group(required=True)
     destination.add_argument('--output', type=Path, help='New local output directory; never overwrite existing output')
     destination.add_argument('--hf-repo-id', help='New Hugging Face dataset repository owner/name')
+    p.add_argument('--hf-use-empty-repo', action='store_true', help='Use an existing dataset repo only if it contains no files besides .gitattributes')
     p.add_argument('--hf-public', action='store_true', help='Create the new Hub repository public (default: private)')
     p.add_argument('--hf-shard-mib', type=int, default=64, help='Approximate uncompressed JSONL shard size in MiB')
     p.add_argument('--source-hf-repo-id', help='Source repository ID to record in report (does not download data)')
@@ -329,6 +337,8 @@ def main():
     args = p.parse_args()
     if args.history < 0 or args.max_shards < 0 or args.hf_shard_mib < 1 or not (0 <= args.val_fraction < 1 and 0 <= args.test_fraction < 1 and args.val_fraction + args.test_fraction < 1): p.error('Invalid history, shard limit, shard size, or split fractions')
     if args.hf_public and not args.hf_repo_id: p.error('--hf-public requires --hf-repo-id')
+    if args.hf_use_empty_repo and not args.hf_repo_id: p.error('--hf-use-empty-repo requires --hf-repo-id')
+    if args.hf_use_empty_repo and args.hf_public: p.error('--hf-public only controls creation of a new repository')
     build(args)
 
 
