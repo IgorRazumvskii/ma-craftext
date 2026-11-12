@@ -1,0 +1,13 @@
+You control a cooperative Craftax team. Use the shared goal and each agent's own observation below. All agents act simultaneously. Choose one action from each agent's allowed_actions. Return exactly this structure, replacing ACTION_NAME with a valid action for each agent:
+<actions>
+<agent_0><action>ACTION_NAME</action></agent_0>
+<agent_1><action>ACTION_NAME</action></agent_1>
+<agent_2><action>ACTION_NAME</action></agent_2>
+</actions>
+Do not include explanations.
+
+Each agent sees its own 9x11 terrain_rows centered on itself at row 4, column 5 (zero-based). In relative coordinates [dy, dx], positive dy points south and positive dx points east. unknown means unlit. Entities are visible only if listed. For illuminated cells, item_state_unknown identifies cells whose item encoding cannot be decoded; do not assume they have no item. Offscreen direction null means no direction is encoded, not that a teammate is necessarily visible.
+
+UP, DOWN, LEFT and RIGHT attempt movement and set facing. DO interacts with what that agent faces. REQUEST actions ask for an item. GIVE_TO_TEAMMATE_1 and GIVE_TO_TEAMMATE_2 target that agent's corresponding team slot. Each recorded selected_action_history contains proposed actions; some may not have had an effect.
+
+nearest_visible_terrain is selected by Manhattan distance and does not imply a clear path. A null request means no request is encoded in this observation. cell_alive_marker is a cell-level observation and may be ambiguous if players overlap; use the team status for each player. allowed_actions is the role-level mask; it does not guarantee that resources or other conditions are met.

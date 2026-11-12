@@ -1,83 +1,76 @@
 # TeachLLM
 
-Скрипты для SFT обучения Qwen-моделей на датасетах MegaPrompt и оценки поведения в MA-Craftax.
+Инструменты для подготовки датасета и обучения моделей для MA-Craftax.
 
-## Требования
+## Подготовка датасета из MAPPO-траекторий
 
-- Linux/macOS
-- Python 3.10+
-- `python3-venv`
-- GPU для обучения (опционально, CPU-режим поддерживается для части утилит)
+`data/build_mappo_sft.py` самостоятельно преобразует исходные Parquet в JSONL с полем `messages`, подходящим для применения chat template Qwen2.5-Instruct. Генератору не нужен MegaPrompt: он читает описание наблюдений из соседнего `MultyAgentCrafText/MA-Craftax` и тексты заданий из соседнего `CrafText`.
 
-Для SR/eval в среде требуется соседняя структура репозиториев:
+Доступны два варианта, которые можно создать за один запуск (`--mode both`):
 
-- `.../project/TeachLLM`
-- `.../project/MegaPrompt`
-- `.../project/MultyAgentCrafText/MA-Craftax`
+- `individual` — одна запись на агента: его роль, наблюдение и история выбранных действий; ответ — `<action>UP</action>`.
+- `team` — одна запись на командный шаг с тремя отдельными наблюдениями; ответ содержит по `<action>` для каждого агента.
 
-Именно такую структуру ожидают дефолтные пути в `train_sft_qwen_3.py`.
+Карта содержит названия клеток и координаты относительно агента. Неизвестное содержимое клеток обозначено отдельно. Разбиение train/validation/test определяется ID траектории, поэтому разные шаги одной траектории и оба варианта не пересекают границы выборок. Тексты системных промптов находятся в `data/prompts/`.
 
-## Быстрый старт
+Действия взяты из успешных эпизодов команды, но успех эпизода не означает, что каждое действие оптимально. Конвертер исключает шаги отдельных агентов в некоторых случаях, когда действие заведомо не может сработать; командная запись исключается, если исключено действие хотя бы одного агента. Это меняет распределение данных, поэтому проверяйте статистику в `report.json`. Текст задания восстанавливается из текущих файлов сценариев: исходная версия сценариев при сборе траекторий не установлена. Полный список проверок и хеши исходных файлов также есть в отчёте.
+
+### Локальная проверка
 
 ```bash
-cd /home/irazumovskii/project/TeachLLM
-chmod +x scripts/install.sh scripts/run.sh
-./scripts/install.sh
+cd /path/to/ma-craftext/TeachLLM
+python -m pip install -r docker/requirements-sft.txt
+python data/build_mappo_sft.py \
+  --parts /path/to/trajectory/parts \
+  --mode both --max-shards 2 \
+  --output /tmp/mappo-sft-example
 ```
 
-Опционально:
+Каталог результата должен быть новым. В нём появятся `individual/`, `team/` с файлами выборок и `report.json`. Для обработки всех частей уберите `--max-shards 2`. Для пропуска повреждённых Parquet можно добавить `--skip-unreadable`; пропущенные файлы будут перечислены в отчёте. Тесты запускаются командой `python -m unittest discover -s tests -v`.
 
-- `./scripts/install.sh --with-eval-deps` — ставит CPU-версию JAX для eval-сценариев.
-- `./scripts/install.sh --with-comet` — ставит `comet_ml`.
+### Запуск на сервере через Docker и сохранение в Hugging Face
 
-## Запуск
-
-Единая точка запуска:
+Нужны Docker с Compose и токен HF с правом читать исходный и создавать/записывать целевой dataset-репозиторий. В каталоге проекта на сервере:
 
 ```bash
-./scripts/run.sh --help
+cd ~/work/TeachLLM
+export HF_TOKEN='ваш_токен'
+export SFT_SOURCE_FOLDER=parts
+export SFT_SOURCE_REVISION=1e52c83cc81b14cd78dd11b299fe3d5f07d4abe4
+export SFT_OUTPUT_REPO=igor69raz/dataset-for-llm-v3
+export SFT_MODE=both
+export SFT_USE_EMPTY_REPO=0
 ```
 
-### 1) Обучение (SFT)
+Укажите ещё не существующий `SFT_OUTPUT_REPO`. Новый репозиторий по умолчанию будет приватным; чтобы создать публичный, задайте `export SFT_PUBLIC=1`. Если прежний каталог с траекториями доступен, используйте его для повторного использования загрузки:
 
 ```bash
-./scripts/run.sh train \
-  --data_dir /home/irazumovskii/project/MegaPrompt/out/expert_prompts_tree_level1_role_action_balanced_train \
-  --streaming_jsonl \
-  --glob "*.jsonl.gz" \
-  --output_dir /home/irazumovskii/project/runs/sft-qwen-tree \
-  --model Qwen/Qwen2.5-3B-Instruct \
-  --epochs 3 \
-  --batch_size 4 \
-  --grad_accum 4 \
-  --lr 2e-4 \
-  --precision fp32 \
-  --attn_implementation eager \
-  --no-dataloader_pin_memory \
-  --no-tf32
+export SFT_WORK_DIR="$HOME/work/MegaPrompt/sft-data"
 ```
 
-Чтобы увидеть все параметры:
+Иначе переменную `SFT_WORK_DIR` можно не задавать: будет создан `TeachLLM/sft-data`. После этого:
 
 ```bash
-./scripts/run.sh train --help
+docker compose -f compose.sft.yaml up -d --build
+docker compose -f compose.sft.yaml logs -f sft
 ```
 
-### 2) Offline accuracy на датасете
+Контейнер скачивает исходные Parquet из `igor69raz/ma-craftax-dataset` на диск сервера и сохраняет их между запусками. Индекс при обработке временно создаётся в `sft-data/tmp` и удаляется после завершения. Готовые JSONL собираются порциями в оперативной памяти и отправляются в HF без сохранения JSONL на диск сервера. Генерация выполняется на CPU; GPU не используется. `Ctrl+C` прекращает просмотр логов, контейнер продолжает работу. Для проверки состояния: `docker compose -f compose.sft.yaml ps -a`.
 
-```bash
-./scripts/run.sh eval-accuracy --help
+Чтобы использовать уже созданный репозиторий, в котором кроме `.gitattributes` нет файлов, задайте `SFT_USE_EMPTY_REPO=1`; существующие данные скрипт не перезаписывает. Загрузка не поддерживает продолжение прерванной публикации: если в репозитории уже появились файлы, для повторного запуска выберите новый репозиторий. `README.md` и `report.json` публикуются после записи частей; проверяйте итоговое сообщение `Completed` и отчёт. Токен не добавляйте в git.
+
+После успешного завершения конфигурации можно загрузить по отдельности:
+
+```python
+from datasets import load_dataset
+individual_train = load_dataset('igor69raz/dataset-for-llm-v3', 'individual', split='train')
+team_train = load_dataset('igor69raz/dataset-for-llm-v3', 'team', split='train')
 ```
 
-### 3) Rollout визуализация в env
+`datasets` устанавливается отдельно. Не передавайте `metadata` модели; при обучении применяйте chat template и рассчитывайте loss по ответу assistant. Длина контекста и фактическое усечение должны быть проверены для выбранного токенизатора и конфигурации обучения.
 
-```bash
-./scripts/run.sh rollout --help
-```
+## Существующие скрипты обучения и оценки
 
-## Полезные замечания
+Скрипты в `train/` и `eval/` относятся к предыдущему формату: в частности, `train/train_sft_qwen_3.py` ожидает `prompt` и `expert_action_label`, а не новый `messages`. Непосредственное обучение на новом датасете и оценку в среде необходимо отдельно адаптировать и проверить; старые пути оценки ссылаются на удалённый MegaPrompt. Создание датасета само по себе не проверяет качество обучения или работу политики в среде.
 
-- Если виртуальное окружение создано в нестандартном месте, используйте:
-  `VENV_DIR=/path/to/venv ./scripts/install.sh`
-- `run.sh` автоматически активирует `.venv`, если она существует.
-- Для совместного запуска PyTorch + JAX в проблемных конфигурациях можно использовать `JAX_PLATFORMS=cpu`.
+Помощь по старым инструментам доступна через `./scripts/run.sh --help`; их установка — через `./scripts/install.sh`.

@@ -1,0 +1,25 @@
+services:
+  sft:
+    image: ma-craftext-sft:latest
+    build:
+      context: ..
+      dockerfile: TeachLLM/Dockerfile.sft
+    init: true
+    environment:
+      HF_TOKEN: ${HF_TOKEN:?Set HF_TOKEN with Hugging Face read and write permissions}
+      SFT_SOURCE_REPO: ${SFT_SOURCE_REPO:-igor69raz/ma-craftax-dataset}
+      SFT_SOURCE_REVISION: ${SFT_SOURCE_REVISION:-main}
+      SFT_SOURCE_FOLDER: ${SFT_SOURCE_FOLDER:-mappo_100k_20261101_210728/parts}
+      SFT_OUTPUT_REPO: ${SFT_OUTPUT_REPO:?Set SFT_OUTPUT_REPO to a new dataset repo owner/name}
+      SFT_PUBLIC: ${SFT_PUBLIC:-0}
+      SFT_USE_EMPTY_REPO: ${SFT_USE_EMPTY_REPO:-0}
+      SFT_SKIP_UNREADABLE: ${SFT_SKIP_UNREADABLE:-1}
+      SFT_SHARD_MIB: ${SFT_SHARD_MIB:-64}
+      SFT_MAX_SHARDS: ${SFT_MAX_SHARDS:-0}
+      SFT_MODE: ${SFT_MODE:-both}
+    volumes:
+      - type: bind
+        source: ${SFT_WORK_DIR:-./sft-data}
+        target: /data
+        bind:
+          create_host_path: true

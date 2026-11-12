@@ -1,1 +1,0 @@
-# Renderers for dialog blocks.

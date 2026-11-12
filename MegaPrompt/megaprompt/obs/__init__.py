@@ -1,1 +1,0 @@
-# Renderers for observation blocks.

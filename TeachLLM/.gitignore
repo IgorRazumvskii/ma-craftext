@@ -32,6 +32,7 @@ Thumbs.db
 # Local environment files
 .env
 .env.*
+sft-data/
 
 # Training and experiment artifacts
 runs/
