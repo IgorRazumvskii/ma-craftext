@@ -614,11 +614,7 @@ def do_action(rng, state, action, env_params, static_params):
     )
     
     # Interact with other players (Damage/Revive)
-    # Сохраняем паттерн перед вызовом interplayer_interaction, так как она изменяет ff_damage_dealt
-    saved_pattern = state.ff_damage_dealt
     state = interplayer_interaction(state, block_position, doing_action, env_params, static_params)
-    # Восстанавливаем паттерн после взаимодействия
-    state = state.replace(ff_damage_dealt=saved_pattern)
     
     # BLOCKS
     # Tree - только MINER может добывать дерево
@@ -1351,10 +1347,9 @@ def place_block(state, action, static_params):
     )
     is_any_player_placing_furnace = jnp.logical_and(
         equal_block_placement,
-        jnp.logical_and(
-            is_player_placing_furnace[:, None],
-            state.player_specialization == Specialization.BUILDER.value
-        ),
+        # All observers of the same tile must scatter the same block value.
+        # The acting player was already checked to be a builder above.
+        is_player_placing_furnace[:, None],
     ).any(axis=0)
     placed_furnace_block = jnp.where(
         is_any_player_placing_furnace,

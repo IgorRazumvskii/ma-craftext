@@ -6,6 +6,7 @@ from craftax_together_talens.craftax_state import EnvState, StaticEnvParams
 from craftax_together_talens.game_logic.constants import (
     REQUEST_PICKAXE,
     REQUEST_SWORD,
+    REQUEST_SAPLING,
     Specialization as RoleSpecialization,
 )
 from craftax_together_talens.util.game_logic_utils import is_boss_vulnerable, get_player_icon_positions
@@ -1038,6 +1039,11 @@ def render_craftax_pixels(state, block_pixel_size, static_params, player_specifi
         message_texture = jnp.where(
             (state.request_type == REQUEST_SWORD)[:, None, None, None],
             textures["sword_textures"][1],
+            message_texture,
+        )
+        message_texture = jnp.where(
+            (state.request_type == REQUEST_SAPLING)[:, None, None, None],
+            textures["sapling_texture"],
             message_texture,
         )
         message_texture = jnp.where(

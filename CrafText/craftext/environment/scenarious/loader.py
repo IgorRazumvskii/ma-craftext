@@ -141,34 +141,32 @@ def get_default_scenario_path():
 
 def load_scenarios(scenarious_config):
     """
-    Dynamically load and aggregate scenario definitions based on a configuration.
+    Load the exact dataset and subset selected by the configuration.
 
-    This function will scan the scenarios directory for files whose names include
-    the configured dataset_key, import either the `test` or `instructions` submodule
-    depending on the `test` flag, and collect all scenario mappings under the given
-    subset_key.
+    Dataset names are not prefixes: for example, jax_conditional_achievements
+    must not also load jax_conditional_achievements_reward_progression. Aggregate
+    datasets such as SMALL perform their explicit merges in their own modules.
 
     Parameters
     ----------
     scenarious_config : ScenariosConfig
         Configuration object with the following attributes:
-        - dataset_key (str): substring to match scenario filenames
+        - dataset_key (str): exact scenario package name
         - subset_key  (str): attribute name inside each module to retrieve scenario dict
         - test        (bool): whether to import from `test` rather than `instructions`
 
     Returns
     -------
     dict
-        A merged dictionary of all scenario definitions found under the matching modules.
+        The selected dictionary of scenario definitions.
 
     Raises
     ------
     ValueError
-        If the scenarios directory path could not be determined.
+        If the dataset or subset does not exist, or the subset is empty.
     ImportError
         If a matching scenario submodule cannot be imported.
     """
-    scenarios = {}
     scenarios_dir = get_default_scenario_path()
    
     module = "test" if scenarious_config.test else "instructions"
@@ -178,13 +176,20 @@ def load_scenarios(scenarious_config):
     if scenarios_dir is None:
         raise ValueError("Scenario path could not be determined.")
 
-    for file in os.listdir(scenarios_dir):
-        if mode in file:
-            scenario_module_name = f"craftext.dataset.scenarious.{file}.{module}"
-            scenario_module = importlib.import_module(scenario_module_name)
-            
-            if hasattr(scenario_module, data_key):
-                scenarios.update(getattr(scenario_module, data_key))
-    
-   
-    return scenarios
+    if not isinstance(mode, str) or not mode.isidentifier():
+        raise ValueError(f"Invalid scenario dataset name: {mode!r}")
+    if not os.path.isdir(os.path.join(scenarios_dir, mode)):
+        raise ValueError(f"Scenario dataset does not exist: {mode!r}")
+
+    scenario_module_name = f"craftext.dataset.scenarious.{mode}.{module}"
+    scenario_module = importlib.import_module(scenario_module_name)
+    if not isinstance(data_key, str) or not hasattr(scenario_module, data_key):
+        raise ValueError(
+            f"Scenario subset {data_key!r} does not exist in {scenario_module_name}"
+        )
+    scenarios = getattr(scenario_module, data_key)
+    if not isinstance(scenarios, dict) or not scenarios:
+        raise ValueError(
+            f"Scenario subset {data_key!r} in {scenario_module_name} must be a non-empty dictionary"
+        )
+    return dict(scenarios)

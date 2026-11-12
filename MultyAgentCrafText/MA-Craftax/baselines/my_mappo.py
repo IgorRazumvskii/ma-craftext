@@ -238,10 +238,18 @@ def unbatchify_actions(x: jnp.ndarray, agent_list, num_envs, num_actors):
 # Training Function
 # ===========================
 def make_train(config, env):
+    for key in ("NUM_ENVS", "NUM_STEPS", "NUM_MINIBATCHES", "UPDATE_EPOCHS"):
+        value = config[key]
+        if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{key} must be a positive integer, got {value!r}")
     config["NUM_ACTORS"] = env.num_agents * config["NUM_ENVS"]
+    if config["NUM_ACTORS"] % config["NUM_MINIBATCHES"]:
+        raise ValueError("NUM_ACTORS must be divisible by NUM_MINIBATCHES for recurrent minibatches")
     config["NUM_UPDATES"] = (
         config["TOTAL_TIMESTEPS"] // config["NUM_STEPS"] // config["NUM_ENVS"]
     )
+    if config["NUM_UPDATES"] < 1:
+        raise ValueError("TOTAL_TIMESTEPS must cover at least one rollout (NUM_STEPS * NUM_ENVS)")
     config["MINIBATCH_SIZE"] = (
         config["NUM_ACTORS"] * config["NUM_STEPS"] // config["NUM_MINIBATCHES"]
     )
@@ -345,7 +353,6 @@ def make_train(config, env):
                 env_act = unbatchify_actions(
                     action, env.agents, config["NUM_ENVS"], env.num_agents
                 )
-                env_act = {k: v.squeeze() for k, v in env_act.items()}
 
                 world_state = last_obs["world_state"].swapaxes(0, 1)
                 world_state = world_state.reshape((config["NUM_ACTORS"], -1))
@@ -425,7 +432,7 @@ def make_train(config, env):
                     def _actor_loss_fn(actor_params, init_hstate, traj_batch, gae):
                         _, pi = actor_network.apply(
                             actor_params,
-                            init_hstate.squeeze(),
+                            init_hstate[0],
                             (traj_batch.obs, traj_batch.done, traj_batch.action_mask),
                         )
                         log_prob = pi.log_prob(traj_batch.action)
@@ -450,7 +457,7 @@ def make_train(config, env):
                     def _critic_loss_fn(critic_params, init_hstate, traj_batch, targets):
                         _, value = critic_network.apply(
                             critic_params,
-                            init_hstate.squeeze(),
+                            init_hstate[0],
                             (traj_batch.world_state, traj_batch.done),
                         )
 
@@ -503,9 +510,11 @@ def make_train(config, env):
                 batch = (
                     init_hstates[0],
                     init_hstates[1],
-                    traj_batch,
-                    advantages.squeeze(),
-                    targets.squeeze(),
+                    # Logging info has environment axes, not actor axes. It is
+                    # retained in traj_batch for metrics but never shuffled for PPO.
+                    traj_batch._replace(info={}),
+                    advantages,
+                    targets,
                 )
                 permutation = jax.random.permutation(_rng, config["NUM_ACTORS"])
 
@@ -526,7 +535,7 @@ def make_train(config, env):
                 train_states, loss_info = jax.lax.scan(_update_minbatch, train_states, minibatches)
                 update_state = (
                     train_states,
-                    jax.tree.map(lambda x: x.squeeze(), init_hstates),
+                    jax.tree.map(lambda x: x[0], init_hstates),
                     traj_batch,
                     advantages,
                     targets,
@@ -669,6 +678,16 @@ def make_train(config, env):
                                 task_name = f"task_{task_idx}"
                             experiment.log_metric(f"instruction/sr_{task_name}", float(idx_sr_cum), step=step)
                             experiment.log_metric(f"instruction/count_{task_name}", float(idx_count_cum), step=step)
+                            # Keep lifetime metrics, but expose the current rollout
+                            # separately so early failures do not hide improvement.
+                            experiment.log_metric(
+                                f"instruction/window_sr_{task_name}",
+                                float(idx_solved_window / idx_count_window), step=step,
+                            )
+                            experiment.log_metric(
+                                f"instruction/window_count_{task_name}",
+                                idx_count_window, step=step,
+                            )
 
                         honest_micro_sr = cumulative_total_solved / max(
                             cumulative_total_issued, 1
@@ -905,6 +924,8 @@ def single_run(config):
     )
     if hasattr(env, "task_names"):
         config["TASK_NAMES"] = list(env.task_names)
+    config["OBS_DIM"] = int(np.prod(env.observation_space(env.agents[0]).shape))
+    config["ACTION_DIM"] = int(env.action_space(env.agents[0]).n)
 
     run_name = config.get("RUN_NAME", "mappo-rnn-run")
     log_dir = config.get("LOG_DIR", "runs")

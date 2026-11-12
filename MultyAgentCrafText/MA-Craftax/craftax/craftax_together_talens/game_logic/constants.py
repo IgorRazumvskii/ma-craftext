@@ -9,11 +9,13 @@ REQUEST_ARMOUR = 56
 REQUEST_BOW = 57
 REQUEST_ARROWS = 58
 REQUEST_TORCHES = 59
+# Appended to preserve every existing action ID. Changes model input/output sizes.
+REQUEST_SAPLING = 60
 
 BASE_REQUEST_COUNT = (
     Action.REQUEST_SAPPHIRE.value - Action.REQUEST_FOOD.value + 1
 )
-EXTENDED_REQUEST_COUNT = REQUEST_TORCHES - REQUEST_PICKAXE + 1
+EXTENDED_REQUEST_COUNT = REQUEST_SAPLING - REQUEST_PICKAXE + 1
 REQUEST_OBSERVATION_DIM = BASE_REQUEST_COUNT + EXTENDED_REQUEST_COUNT
 
 
@@ -62,6 +64,7 @@ WARRIOR_ACTIONS = (
 )
 
 BUILDER_ACTIONS = (
+    REQUEST_SAPLING,
     Action.REQUEST_WOOD.value,
     Action.REQUEST_STONE.value,
     Action.REQUEST_IRON.value,
@@ -136,5 +139,5 @@ def get_team_action_masks(specializations, action_dim):
 def get_action_dim(player_count):
     """Size required for all GIVE targets and extended request actions."""
     give_action_dim = Action.GIVE.value + player_count - 1
-    request_action_dim = REQUEST_TORCHES + 1
+    request_action_dim = REQUEST_SAPLING + 1
     return max(give_action_dim, request_action_dim)

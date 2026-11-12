@@ -18,7 +18,8 @@ import jax.numpy as jnp
 import numpy as np
 import matplotlib.pyplot as plt
 
-from my_ippo import ActorCriticRNN, ScannedRNN
+from my_ippo import ActorCriticRNN
+from my_mappo import ActorRNN, ScannedRNN, build_actor_action_mask
 from craftax.craftax_together_talens.envs.patterns_wrapper import (
     make_craftax_env_with_my_wrapper,
 )
@@ -30,8 +31,13 @@ def load_checkpoint(checkpoint_path: str):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     with open(checkpoint_path, "rb") as f:
         checkpoint = pickle.load(f)
-    if not isinstance(checkpoint, dict) or "train_state" not in checkpoint:
-        raise ValueError("Invalid checkpoint format: expected key 'train_state'")
+    if not isinstance(checkpoint, dict) or not (
+        "actor_train_state" in checkpoint or "train_state" in checkpoint
+    ):
+        raise ValueError(
+            "Invalid checkpoint format: expected 'actor_train_state' (MAPPO) "
+            "or 'train_state' (IPPO)"
+        )
     return checkpoint
 
 
@@ -40,7 +46,8 @@ def restore_model_params(checkpoint):
         tree_map_fn = jax.tree.map
     except AttributeError:
         tree_map_fn = jax.tree_util.tree_map
-    return tree_map_fn(lambda x: jnp.array(x), checkpoint["train_state"]["params"])
+    state_key = "actor_train_state" if "actor_train_state" in checkpoint else "train_state"
+    return tree_map_fn(lambda x: jnp.array(x), checkpoint[state_key]["params"])
 
 
 def select_fixed_instruction_idx(env, instruction_idx: int, task_idx: int | None):
@@ -68,7 +75,8 @@ def select_fixed_instruction_idx(env, instruction_idx: int, task_idx: int | None
     return -1
 
 
-def run_episode(env, network, params, rng, max_steps, instruction_idx, greedy):
+def run_episode(env, network, params, rng, max_steps, instruction_idx, greedy,
+                action_mask=None):
     rng, reset_rng = jax.random.split(rng)
     obs, text_state = env.reset(reset_rng, instruction_idx=instruction_idx)
 
@@ -87,13 +95,16 @@ def run_episode(env, network, params, rng, max_steps, instruction_idx, greedy):
         ac_in = (obs_batch[jnp.newaxis, :], done_array[jnp.newaxis, :])
 
         rng, action_rng = jax.random.split(rng)
-        hstate, pi, _ = network.apply(params, hstate, ac_in)
-        if greedy:
-            action = jnp.argmax(pi.probs, axis=-1).squeeze()
+        if action_mask is None:
+            hstate, pi, _ = network.apply(params, hstate, ac_in)
         else:
-            action = pi.sample(seed=action_rng).squeeze()
-        if action.ndim > 1:
-            action = action.flatten()
+            hstate, pi = network.apply(
+                params, hstate, (*ac_in, action_mask[jnp.newaxis, :])
+            )
+        if greedy:
+            action = jnp.argmax(pi.probs, axis=-1).reshape((num_agents,))
+        else:
+            action = pi.sample(seed=action_rng).reshape((num_agents,))
         action_dict = {agent: jnp.int32(action[i]) for i, agent in enumerate(env.agents)}
 
         rng, step_rng = jax.random.split(rng)
@@ -125,6 +136,10 @@ def main():
     parser.add_argument("--num-episodes", type=int, default=200, help="Number of episodes")
     parser.add_argument("--max-steps", type=int, default=10000, help="Max steps per episode")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument(
+        "--craftext-config", default=None,
+        help="Override checkpoint task split, e.g. easy_test_paraphrases",
+    )
     parser.add_argument(
         "--instruction-idx",
         type=int,
@@ -178,11 +193,13 @@ def main():
         help="Print progress every N episodes (0 disables intermediate logs)",
     )
     args = parser.parse_args()
+    if args.num_episodes <= 0 or args.max_steps <= 0:
+        parser.error("--num-episodes and --max-steps must be positive")
 
     checkpoint = load_checkpoint(args.checkpoint)
     config = checkpoint.get("config", {})
     env_name = config.get("ENV_NAME", "Craftax-Coop-Symbolic")
-    craftext_config_name = config.get("CRAFTEXT_CONFIG_NAME", "easy_train")
+    craftext_config_name = args.craftext_config or config.get("CRAFTEXT_CONFIG_NAME", "easy_train")
 
     env = make_craftax_env_with_my_wrapper(
         env_name, craftext_config_name=craftext_config_name
@@ -204,7 +221,23 @@ def main():
         )
 
     params = restore_model_params(checkpoint)
-    network = ActorCriticRNN(env.action_space(env.agents[0]).n, config=config)
+    is_mappo = "actor_train_state" in checkpoint
+    if is_mappo:
+        input_dim = int(params["params"]["Dense_0"]["kernel"].shape[0])
+        output_dim = int(params["params"]["Dense_2"]["bias"].shape[0])
+        expected_input = int(np.prod(env.observation_space(env.agents[0]).shape))
+        expected_output = int(env.action_space(env.agents[0]).n)
+        if (input_dim, output_dim) != (expected_input, expected_output):
+            raise ValueError(
+                f"Checkpoint observation/action dimensions {(input_dim, output_dim)} "
+                f"do not match this environment {(expected_input, expected_output)}. "
+                "Use the environment version used for training, or retrain. "
+                "Adding REQUEST_SAPLING changes both dimensions."
+            )
+    network_class = ActorRNN if is_mappo else ActorCriticRNN
+    network = network_class(env.action_space(env.agents[0]).n, config=config)
+    action_mask = build_actor_action_mask(env, 1) if is_mappo else None
+    print(f"Evaluating {'MAPPO' if is_mappo else 'IPPO'} on {craftext_config_name}")
 
     rng = jax.random.PRNGKey(args.seed)
     posed = 0
@@ -225,6 +258,7 @@ def main():
             max_steps=args.max_steps,
             instruction_idx=fixed_instruction_idx,
             greedy=args.greedy,
+            action_mask=action_mask,
         )
 
         posed += 1
@@ -330,6 +364,7 @@ def main():
 
     summary = {
         "checkpoint": str(args.checkpoint),
+        "algorithm": "mappo" if is_mappo else "ippo",
         "env_name": env_name,
         "craftext_config_name": craftext_config_name,
         "num_episodes": int(args.num_episodes),
@@ -342,6 +377,13 @@ def main():
         "solved": int(solved),
         "timeouts": int(timeouts),
         "sr_honest_micro": float(overall_sr),
+        "sr_macro_observed": float(np.mean([item["sr"] for item in per_task_summary])),
+        "num_tasks_observed": len(per_task_summary),
+        "num_tasks_available": len(env.task_names),
+        "successful_steps_mean": (
+            float(np.mean([row["steps"] for row in episode_rows if row["solved"]]))
+            if solved else None
+        ),
         "per_task": per_task_summary,
         "episodes_csv": str(episodes_csv_path),
     }

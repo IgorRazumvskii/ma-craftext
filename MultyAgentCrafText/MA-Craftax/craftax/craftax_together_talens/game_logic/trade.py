@@ -88,6 +88,12 @@ def trade_materials(state, action, static_params):
         Action.REQUEST_SAPPHIRE.value, state.inventory.sapphire, 99, new_trade_count, successful_trades, can_trade_mask=is_miner
     )
 
+    # Saplings follow the same request/GIVE protocol as other miner resources.
+    new_sapling, new_trade_count, successful_trades = _new_material_value(
+        REQUEST_SAPLING, state.inventory.sapling, 99, new_trade_count,
+        successful_trades, can_trade_mask=is_miner
+    )
+
     # Tools and Equipment
     # Pickaxe, Sword, Bow - BUILDER передает инструмент запросившему игроку.
     def _new_tool_value(tool_type, current_tool_level, max_tool_level, old_trade_count, successful_trades, can_trade_mask=None):
@@ -220,6 +226,7 @@ def trade_materials(state, action, static_params):
         player_hunger=new_hunger,
         player_thirst=new_thirst,
         inventory=state.inventory.replace(
+            sapling=new_sapling,
             wood=new_wood,
             stone=new_stone,
             iron=new_iron,
@@ -259,7 +266,7 @@ def make_request(state, action):
     )
     is_making_tool_request = jnp.logical_and(
         action >= REQUEST_PICKAXE,
-        action <= REQUEST_TORCHES
+        action <= REQUEST_SAPLING
     )
     is_making_request = jnp.logical_or(
         is_making_material_request,
