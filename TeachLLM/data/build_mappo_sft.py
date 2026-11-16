@@ -24,12 +24,12 @@ from trajectory_io import table_to_arrays, load_scenarios, read_layout
 
 DEFAULT_PARTS = WORK / 'HF/datasets/mappo_100k_20261101_210728_parts'
 DEFAULT_SCENARIOS = PROJECT / 'CrafText/craftext/dataset/scenarious/jax_conditional_achievements/instructions.py'
-REQUESTS = ['FOOD', 'DRINK', 'WOOD', 'STONE', 'IRON', 'COAL', 'DIAMOND', 'RUBY', 'SAPPHIRE', 'PICKAXE', 'SWORD', 'ARMOUR', 'BOW', 'ARROWS', 'TORCHES']
+REQUESTS = ['FOOD', 'DRINK', 'WOOD', 'STONE', 'IRON', 'COAL', 'DIAMOND', 'RUBY', 'SAPPHIRE', 'PICKAXE', 'SWORD', 'ARMOUR', 'BOW', 'ARROWS', 'TORCHES', 'SAPLING']
 ROLES = ['MINER', 'BUILDER', 'CRAFTER']
 INVENTORY = ['wood', 'stone', 'coal', 'iron', 'diamond', 'sapphire', 'ruby', 'sapling', 'torches', 'arrows', 'books', 'pickaxe_tier', 'sword_tier', 'sword_enchantment', 'bow_enchantment', 'bow']
 STATS = ['food', 'drink', 'energy', 'mana', 'xp', 'dexterity', 'strength', 'intelligence']
 COMMON = [0, 1, 2, 3, 4, 5, 6, 17, 19, 52, 53]
-BUILDER = [45, 46, 47, 48, 49, 50, 51, 7, 8, 9, 10, 28, 11, 12, 13, 20, 14, 15, 16, 21, 22, 23, 25, 38]
+BUILDER = [60, 45, 46, 47, 48, 49, 50, 51, 7, 8, 9, 10, 28, 11, 12, 13, 20, 14, 15, 16, 21, 22, 23, 25, 38]
 
 OFFSCREEN_DIRECTIONS = ('west', 'east', 'north', 'northwest', 'northeast',
                         'south', 'southwest', 'southeast')
@@ -59,10 +59,21 @@ TOOL_UPGRADES = {11: (11, 1), 12: (11, 2), 13: (11, 3), 20: (11, 4),
                  14: (12, 1), 15: (12, 2), 16: (12, 3), 21: (12, 4)}
 
 
+def normalize_observation(obs):
+    """Normalize current 16-request dashboards to legacy offsets without losing requests."""
+    obs = np.asarray(obs)
+    if len(obs) == 8746:
+        return obs, None
+    if len(obs) != 8749:
+        raise ValueError(f'Expected 8746 or 8749 symbolic features, got {len(obs)}')
+    dashboard = obs[8613:8676].reshape(3, 21)
+    legacy = np.concatenate((obs[:8613], dashboard[:, :20].reshape(-1), obs[8676:]))
+    return legacy, dashboard[:, 20]
+
+
 def exclusion_reason(obs, action):
     """Exclude only actions provably ineffective under the current game code."""
-    if len(obs) != 8746:
-        raise ValueError(f'Expected compact 8746-feature observation, got {len(obs)}')
+    obs, _ = normalize_observation(obs)
     tail = np.asarray(obs[8613:], dtype=float)
     dashboard = tail[:60].reshape(3, 20)
     if dashboard[0, 1] <= .5:
@@ -86,7 +97,7 @@ def exclusion_reason(obs, action):
 def action_name(value, actions):
     if value in (52, 53):
         return f'GIVE_TO_TEAMMATE_{value - 51}'
-    if value in range(54, 60):
+    if value in range(54, 61):
         return 'REQUEST_' + REQUESTS[9 + value - 54]
     if value not in actions:
         raise ValueError(f'Unknown action ID {value}')
@@ -108,7 +119,7 @@ def n(v):
  return round(float(v),6)
 
 def describe_obs(obs, agent, history, classes):
- if len(obs) != 8746: raise ValueError(f'Expected compact 8746-feature observation, got {len(obs)}')
+ obs, sapling = normalize_observation(obs)
  grid=obs[:8613].reshape(9,11,87); tail=obs[8613:]; dash=tail[:60].reshape(3,20); pos=[agent]+[x for x in range(3) if x!=agent]
  terrain=[]; unknown_items=[]; objects=[]; nearest={}
  for y in range(9):
@@ -137,11 +148,11 @@ def describe_obs(obs, agent, history, classes):
   terrain.append(' '.join(names))
  team=[];directions=tail[60:84].reshape(3,8)
  for j in (1,2):
-  d=dash[j]; roleid=np.flatnonzero(d[2:5]>.5);rq=np.flatnonzero(d[5:20]>.5);di=np.flatnonzero(directions[j]>.5)
+  d=dash[j]; roleid=np.flatnonzero(d[2:5]>.5);rq=np.flatnonzero(np.append(d[5:20], sapling[j] if sapling is not None else 0)>.5);di=np.flatnonzero(directions[j]>.5)
   team.append({'slot':j,'id':f'agent_{pos[j]}','role':ROLES[int(roleid[0])] if len(roleid)==1 else 'unknown','health':n(d[0]*10),'alive':bool(d[1]>.5),'request':REQUESTS[int(rq[0])] if len(rq)==1 else None,'offscreen_direction':OFFSCREEN_DIRECTIONS[int(di[0])] if len(di)==1 else None})
  d=dash[0];rid=np.flatnonzero(d[2:5]>.5)
  if len(rid)!=1: raise ValueError('Unknown or invalid agent role')
- own_request=np.flatnonzero(d[5:20]>.5)
+ own_request=np.flatnonzero(np.append(d[5:20], sapling[0] if sapling is not None else 0)>.5)
  invraw=tail[84:100]; inv={name:(int(np.rint((float(v)*10)**2)) if i<10 else int(round(float(v)*4)) if i in (11,12) else n(v)) for i,(name,v) in enumerate(zip(INVENTORY,invraw))}
  potion=[int(round((float(v)*10)**2)) for v in tail[100:106]]
  stats={k:n(v*10) for k,v in zip(STATS,tail[106:114])}

@@ -38,6 +38,17 @@ class ConversionTests(unittest.TestCase):
         dash[0, 2+role] = 1
         return obs
 
+    def test_current_sapling_request_layout(self):
+        old = self.observation(role=1)
+        dashboard = old[8613:8673].reshape(3, 20)
+        expanded = np.concatenate((old[:8613], np.column_stack((dashboard, [1, 0, 1])).reshape(-1), old[8673:]))
+        view = builder.describe_obs(expanded, 0, [], self.classes)
+        self.assertEqual(view['request'], 'SAPLING')
+        self.assertEqual(view['teammates'][1]['request'], 'SAPLING')
+        self.assertIn('REQUEST_SAPLING', view['allowed_actions'])
+        self.assertEqual(builder.action_name(60, self.classes['Action']), 'REQUEST_SAPLING')
+        self.assertIsNone(builder.exclusion_reason(expanded, 60))
+
     def test_directions_map_unknown_and_entities(self):
         for idx, direction in enumerate(builder.OFFSCREEN_DIRECTIONS):
             obs = self.observation()

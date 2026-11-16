@@ -1,2 +1,6 @@
 .env
 **/.env
+.venv-human/
+human_data/
+__pycache__/
+*.pyc
