@@ -86,6 +86,7 @@ class MultiAgentInstructionAdapter(InstructionWrapper):
         self.default_params = env.default_params
         self.num_agents = env.num_agents
         self.agents = env.agents
+        self.capture_terminal_state = False
         instruction_shape = self.scenario_handler.scenario_data_jax.embeddings_list.shape[1:]
         self.instruction_dim = 1
         for size in instruction_shape:
@@ -280,6 +281,10 @@ class MultiAgentInstructionAdapter(InstructionWrapper):
         )
 
         info["user_info"] = user_info
+        # Collection needs the world before the automatic reset, not the next episode.
+        if self.capture_terminal_state:
+            info["terminal_state"] = next_base_state
+            info["terminal_obs"] = continued_obs
         info.update(
             {
                 "SR": continued_state.total_success_rate,

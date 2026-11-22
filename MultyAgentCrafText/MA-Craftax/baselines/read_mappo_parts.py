@@ -38,3 +38,16 @@ def iter_parts(meta_path, restore_obs=True):
                 values = np.broadcast_to(values[:, None, :], (*data["obs"].shape[:2], values.shape[-1]))
                 data["obs"] = np.concatenate((data["obs"], values), axis=-1)
             yield data
+
+
+def iter_terminal_states(meta_path):
+    """Yield batches of post-success world snapshots keyed by trajectory_id."""
+    meta_path = Path(meta_path)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if __package__:
+        from .trajectory_parquet import iter_parquet
+    else:
+        from trajectory_parquet import iter_parquet
+    directory = meta_path.parent / Path(meta["terminal_states_dir"]).name
+    for entry in meta["terminal_states_parts"]:
+        yield from iter_parquet(directory / Path(entry["path"]).name)

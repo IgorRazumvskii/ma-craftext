@@ -1,66 +1,50 @@
-# Сбор MAPPO-траекторий в Docker
+# Локальный сбор успешных MAPPO-траекторий
 
 Для запуска нужны Docker Compose, NVIDIA GPU и NVIDIA Container Toolkit.
 Каталоги `CrafText` и `MultyAgentCrafText` должны находиться рядом.
-
-Из каталога `MultyAgentCrafText` укажите путь к чекпоинту на машине с Docker
-и Hugging Face dataset-репозиторий:
+Чекпоинт и каталог результатов должны существовать на сервере до запуска.
 
 ```bash
 cd /ПУТЬ/К/ma-craftext/MultyAgentCrafText
-export COLLECT_CHECKPOINT="/ПОЛНЫЙ/ПУТЬ/mappo_model_latest.pkl"
-export HF_DATASET_REPO_ID="ваш-логин/название-датасета"
-```
-
-Введите токен Hugging Face с правом записи в репозиторий (команда для bash):
-
-```bash
-read -r -s -p "HF token: " HF_TOKEN; echo
-export HF_TOKEN
-```
-
-Соберите образ и запустите пробный сбор четырёх успешных траекторий:
-
-```bash
-docker compose -f compose.collect.yaml build collect
-docker compose -f compose.collect.yaml run --rm collect
-```
-
-Для основного сбора задайте параметры и повторите запуск:
-
-```bash
+export COLLECT_CHECKPOINT=/ПОЛНЫЙ/ПУТЬ/mappo_model_latest.pkl
+export COLLECT_OUTPUT_DIR=/ПОЛНЫЙ/ПУТЬ/К/ДАТАСЕТУ
+mkdir -p "$COLLECT_OUTPUT_DIR"
 export COLLECT_GPU_ID=0
-export COLLECT_NUM_TRAJECTORIES=100
+export COLLECT_NUM_TRAJECTORIES=100000
 export COLLECT_NUM_ENVS=2
+export COLLECT_MAX_STEPS=100
 export COLLECT_ROLLOUT_STEPS=128
-export COLLECT_SHARD_SIZE_MIB=32
-export COLLECT_MAX_STEPS=2000
-export COLLECT_SEED=0
 
-docker compose -f compose.collect.yaml run --rm collect --max-attempts 500
+docker compose -f compose.collect.yaml build collect
+docker compose -f compose.collect.yaml run -d --rm collect
 ```
 
-`--max-attempts` ограничивает количество попыток; без него сбор продолжается
-до получения заданного числа успешных траекторий. Можно также передать
-`--greedy` или `--task-idx 0`. При нехватке памяти GPU уменьшите
+Команда печатает ID контейнера. Логи: `docker logs -f <ID>`; Ctrl+C
+прекращает просмотр, но не работу фонового контейнера. Для пробного запуска
+перед командой задайте `COLLECT_NUM_TRAJECTORIES=4` и при необходимости
+передайте `--max-attempts 100`. Без лимита попыток сбор продолжается до
+получения заданного числа успешных траекторий. При нехватке памяти уменьшите
 `COLLECT_NUM_ENVS` или `COLLECT_ROLLOUT_STEPS`.
 
-Сохраняются только успешные эпизоды в Parquet с сжатием Zstandard.
-Несколько траекторий объединяются в один файл и загружаются на Hugging Face;
-после успешной отправки файл удаляется локально. `COLLECT_SHARD_SIZE_MIB`
-задаёт ориентир по несжатому объёму данных, а не предел размера файла.
-Шард закрывается после окончания эпизода и может превысить это значение. Новый dataset-репозиторий создаётся
-приватным. При достижении лимита попыток частичный набор публикуется с
-`complete: false`, если удалось собрать хотя бы одну траекторию.
+Лимит — 100 совместных шагов среды: для трёх агентов это до 100 действий на
+агента или 300 действий суммарно. `COLLECT_MAX_STEPS` может уменьшить лимит,
+но не увеличить его выше 100. Эпизод завершается раньше
+при выполнении задачи или прекращении среды; учитываются только успешные.
+`COLLECT_ROLLOUT_STEPS` задаёт длину блока вычислений, а не лимит эпизода.
 
-Незавершённые эпизоды и текущий шард занимают место в Docker volume.
-При ошибке незагруженные файлы остаются в Docker volume. Просмотреть их можно
-командой:
+Результаты хранятся на сервере в новом каталоге `collect_*` внутри
+`COLLECT_OUTPUT_DIR`: Parquet с переходами в `*_parts`, отдельные Parquet
+`*_terminal_states` с полным состоянием мира (`state/...`) и наблюдениями
+агентов (`terminal_obs`) после успешного действия и до автоматического сброса,
+а также embeddings и итоговый `*.meta.json`. Состояние соединяется с переходами
+по `trajectory_id`. Формат переходов совместим с TeachLLM. Функции
+`iter_parts` и `iter_terminal_states` в `baselines/read_mappo_parts.py`
+читают оба набора. Данные не загружаются на Hugging Face; загрузка исходной
+модели кодирования текста для работы среды при первом запуске может требовать
+сети и кэшируется в Docker volume.
 
-```bash
-docker compose -f compose.collect.yaml run --rm --entrypoint bash collect \
-  -c 'ls -lahR /staging'
-```
-
-Автоматического продолжения прерванного сбора нет. Для восстановления полных
-наблюдений из сохранённых частей используйте `baselines/read_mappo_parts.py`.
+Метаданные создаются после завершения сбора. При прерывании закрытые Parquet
+шарды остаются в каталоге, но открытый шард и незавершённые эпизоды могут быть
+потеряны; автоматического продолжения сбора нет. Для 100 000 эпизодов требуется
+заранее проверить свободное место: полные состояния мира существенно
+увеличивают размер данных.

@@ -135,7 +135,7 @@ def build_rollout_fn(
     actor_action_mask = build_actor_action_mask(env, num_envs)
 
     def _env_step(carry, _):
-        env_state, last_obs, last_done, hstate, rng, alive = carry
+        env_state, last_obs, last_done, hstate, rng, alive, terminal_state, terminal_obs = carry
 
         obs_actor = batchify_obs(last_obs, agents, num_actors)
         ac_in = (
@@ -163,6 +163,12 @@ def build_rollout_fn(
         done_batch = batchify_obs(done, agents, num_actors).squeeze()
         done_all = done["__all__"]
         next_alive = jnp.logical_and(alive, jnp.logical_not(done_all))
+        capture = alive & done_all
+        def capture_terminal(old, new):
+            mask = capture.reshape((num_envs,) + (1,) * (new.ndim - 1))
+            return jnp.where(mask, new, old)
+        terminal_state = jax.tree.map(capture_terminal, terminal_state, info["terminal_state"])
+        terminal_obs = jax.tree.map(capture_terminal, terminal_obs, info["terminal_obs"])
 
         obs_ead = jnp.swapaxes(jnp.stack([last_obs[a] for a in agents]), 0, 1)
         if compact_obs:
@@ -187,7 +193,8 @@ def build_rollout_fn(
             "instruction_idx": instruction_idx,
             "task_idx": task_idx,
         }
-        new_carry = (next_env_state, next_obs, done_batch, hstate, rng, next_alive)
+        new_carry = (next_env_state, next_obs, done_batch, hstate, rng, next_alive,
+                     terminal_state, terminal_obs)
         return new_carry, transition
 
     def rollout(carry):
@@ -219,6 +226,15 @@ def save_rollout_part(traj, parts_dir, part_idx, trajectory_id_base, take, step_
     np.savez_compressed(part_path, **data)
     print(f"Saved part {part_idx:06d}: {part_path} (rows={len(env_idx)})", flush=True)
     return {"path": str(part_path), "num_rows": int(len(env_idx))}, counts
+
+
+def terminal_snapshot_data(terminal_state, terminal_obs, agents, env_idx, trajectory_id):
+    data = {"trajectory_id": np.asarray([trajectory_id], dtype=np.int32),
+            "terminal_obs": np.stack([terminal_obs[a][env_idx] for a in agents])[None]}
+    for path, value in jax.tree_util.tree_flatten_with_path(terminal_state)[0]:
+        name = "state" + "".join("/" + str(getattr(key, "name", getattr(key, "idx", getattr(key, "key", key)))) for key in path)
+        data[name] = np.asarray(value[env_idx])[None]
+    return data
 
 
 def prepare_stream_upload(repo_id, private, parts_dir, output_base):
@@ -275,7 +291,8 @@ def main():
                         help="Number of successful trajectories to collect")
     parser.add_argument("--max-attempts", type=int, default=0,
                         help="Maximum attempted episodes; 0 means unlimited")
-    parser.add_argument("--max-steps", type=int, default=2000)
+    parser.add_argument("--max-steps", type=int, default=100,
+                        help="Maximum joint environment steps per episode (at most 100)")
     parser.add_argument(
         "--num-envs-collect",
         type=int,
@@ -332,6 +349,10 @@ def main():
         help="Create/use a public Hub dataset repo (default: private)",
     )
     args = parser.parse_args()
+    if not 1 <= args.max_steps <= 100:
+        parser.error("--max-steps must be between 1 and 100 joint environment steps")
+    if args.hf_upload or args.hf_stream_upload or args.hf_repo_id or args.hf_public:
+        parser.error("This collector stores datasets locally; Hugging Face uploads are disabled")
     if args.hf_stream_upload and not args.hf_upload:
         parser.error("--hf-stream-upload requires --hf-upload")
 
@@ -355,6 +376,7 @@ def main():
         env_name,
         craftext_config_name=craftext_config_name,
     )
+    env.capture_terminal_state = True
 
     fixed_instruction_idx = select_fixed_instruction_idx(
         env, args.instruction_idx, args.task_idx
@@ -424,9 +446,10 @@ def main():
     output_base = Path(output_path)
     parts_dir = output_base.with_suffix("").parent / f"{output_base.with_suffix('').name}_parts"
     pending_dir = output_base.with_suffix("").parent / f"{output_base.with_suffix('').name}_pending"
+    terminal_dir = output_base.with_suffix("").parent / f"{output_base.with_suffix('').name}_terminal_states"
     if pending_dir.exists():
         raise FileExistsError(f"Pending trajectory directory already exists: {pending_dir}")
-    if parts_dir.exists() or output_base.with_suffix(".meta.json").exists() or output_base.with_suffix(".embeddings.npz").exists() or output_base.with_suffix(".embeddings.parquet").exists():
+    if parts_dir.exists() or terminal_dir.exists() or output_base.with_suffix(".meta.json").exists() or output_base.with_suffix(".embeddings.npz").exists() or output_base.with_suffix(".embeddings.parquet").exists():
         raise FileExistsError(f"Dataset output already exists for {output_base}; choose a new --output")
 
     num_agents = env.num_agents
@@ -444,6 +467,7 @@ def main():
         stream_upload_file(stream_api, stream_repo, path, f"{parts_dir.name}/{path.name}")
     writer = ShardWriter(parts_dir, args.shard_size_mib * 1024 * 1024,
                          on_upload=upload_shard if stream_api is not None else None)
+    terminal_writer = ShardWriter(terminal_dir, args.shard_size_mib * 1024 * 1024)
     parts_manifest = writer.parts
 
     # Store the exact embeddings used in this process; no model re-encoding is needed.
@@ -476,7 +500,8 @@ def main():
         last_done = jnp.zeros((num_actors_collect,), dtype=bool)
         rng, rollout_rng = jax.random.split(rng)
         carry = (env_state_batch, obs_batch, last_done, hstate, rollout_rng,
-                 jnp.arange(num_envs_collect) < take_in_batch)
+                 jnp.arange(num_envs_collect) < take_in_batch,
+                 env_state_batch.env_state, obs_batch)
         lengths = np.zeros(take_in_batch, dtype=np.int64)
         resolved = np.zeros(take_in_batch, dtype=bool)
         pending = [[] for _ in range(take_in_batch)]
@@ -507,6 +532,10 @@ def main():
                 success = bool(np.any(done & (episode_chunk["instruction_done"][:, 0] > 0)))
                 terminal = bool(done.any())
                 if success:
+                    terminal_state, terminal_obs = jax.device_get((carry[-2], carry[-1]))
+                    terminal_writer.write(terminal_snapshot_data(
+                        terminal_state, terminal_obs, env.agents, env_idx, attempts_done + env_idx))
+                    terminal_writer.maybe_flush()
                     # Write successful fragments into a bounded-memory shard.
                     for item in pending[env_idx]:
                         src = Path(item["path"])
@@ -539,6 +568,7 @@ def main():
         pending_dir.rmdir()
     complete = trajectories_done == args.num_trajectories
     writer.flush()
+    terminal_writer.flush()
     if total_steps_collected == 0:
         raise RuntimeError("No transitions were collected (empty dataset).")
 
@@ -581,6 +611,9 @@ def main():
         "parts_may_split_trajectories": False,
         "parts_dir": str(parts_dir),
         "parts": parts_manifest,
+        "terminal_states_dir": str(terminal_dir),
+        "terminal_states_parts": terminal_writer.parts,
+        "terminal_state_description": "Post-action world state and per-agent observations before automatic reset, keyed by trajectory_id",
         "save_every_trajectories": None,
     }
 
@@ -607,29 +640,6 @@ def main():
     if not complete:
         raise RuntimeError("Attempt limit reached before collecting all successful trajectories; partial dataset saved locally")
 
-    # Optional Hugging Face Hub upload of parts + metadata.
-    hf_private = not bool(args.hf_public)
-    try:
-        from hf_hub_utils import upload_files_to_hub, upload_folder_to_hub
-
-        upload_folder_to_hub(
-            parts_dir,
-            repo_id=args.hf_repo_id,
-            repo_type="dataset",
-            path_in_repo=parts_dir.name,
-            private=hf_private,
-            enabled=bool(args.hf_upload),
-        )
-        upload_files_to_hub(
-            [meta_path] + ([embedding_path] if embedding_path else []),
-            repo_id=args.hf_repo_id,
-            repo_type="dataset",
-            path_in_repo_prefix="",
-            private=hf_private,
-            enabled=bool(args.hf_upload),
-        )
-    except Exception as hf_err:
-        print(f"[hf_hub] Dataset upload failed (local files kept): {hf_err}")
 
 
 if __name__ == "__main__":
